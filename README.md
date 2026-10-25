@@ -45,6 +45,26 @@ tested behavior and the remaining limits.
 
 A complete build is described in [BUILD.md](BUILD.md).
 
+## One-click setup on Windows
+
+Download `PES6Builder.exe` from the [v1.0.0 release](https://github.com/iptory/pes6-native/releases/tag/v1.0.0).
+
+The builder contains no game code or game data. It asks for your own PAL ISO or
+extracted game folder, checks the required tools, downloads the pinned ReXGlue
+SDK and public project source, and builds the game locally.
+
+Required on the build machine:
+
+- Git
+- CMake
+- Ninja
+- LLVM/Clang
+- Visual Studio 2022 Build Tools with the Windows SDK
+
+The builder shows the exact `winget` commands for missing tools. After the build,
+it assembles a local `PES6` folder and launches `Play PES6.cmd`. No game data or
+generated code is uploaded.
+
 ## Repository layout
 
 | Path | Purpose |

@@ -13,6 +13,7 @@ First full source release of the native Windows x64 PES6 project.
 - Controller-navigable virtual keyboard for Xbox 360 text entry.
 - Original window title and optional user-supplied title icon.
 - Source-only release checks that reject game data and build output.
+- `PES6Builder.exe`, a no-game-code setup and build program for Windows.
 
 ### Fixed
 

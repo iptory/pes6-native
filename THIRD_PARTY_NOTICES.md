@@ -88,3 +88,10 @@ follow Microsoft's redistribution terms.
 Pro Evolution Soccer 6, its code, its data, and its trademarks are property of
 Konami and their respective owners. No game material is licensed by this
 repository.
+
+
+## PES6Builder
+
+The optional prebuilt `PES6Builder.exe` setup program embeds Python, Tcl/Tk,
+Pillow, and PyInstaller. It contains no game code. Its notices are in
+`builder/NOTICES.md`.
