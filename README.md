@@ -11,7 +11,8 @@ game data, generated translation units, XEX decryption keys, or compiled
 binaries.
 
 Read [LEGAL.md](LEGAL.md) before you fork this repository or publish a build.
-The safe distribution is source only.
+The safe distribution is source only. The first full source release is v1.0.0;
+see [CHANGELOG.md](CHANGELOG.md).
 
 ## What you get after building
 
