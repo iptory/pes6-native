@@ -38,21 +38,30 @@ The symlink fix is required on Windows checkouts where Git writes libmspack's
 relative symlinks as text files. It replaces those stubs with copies of their
 targets.
 
-## 2. Build and install the SDK
+## 2. Write local presets
+
+From the repository root:
 
 ```bash
-cmake --preset win-amd64
-cmake --build --preset win-amd64-release --target install
+python tools/configure_windows.py
 ```
 
-The install goes to `rexglue-sdk/out/install/win-amd64`. It contains
+The helper finds `clang.exe`, `clang++.exe`, and the newest Windows SDK
+`rc.exe`, then writes `rexglue-sdk/CMakeUserPresets.json` and
+`project/CMakeUserPresets.json`. Both files are ignored by Git. Re-run with
+`--force` after changing tool paths.
+
+## 3. Build and install the SDK
+
+```bash
+cmake --preset win-amd64-local
+cmake --build --preset win-amd64-local-release --target install
+```
+
+The install goes to `rexglue-sdk/out/install/win-amd64-local`. It contains
 `bin/rexglue.exe`, `rexruntime.dll`, and `rexgpu-xenos.dll`.
 
-If your LLVM installation is not on `PATH`, pass the compiler paths to
-CMake, or create a local `CMakeUserPresets.json` in the SDK checkout. Do not
-commit machine-specific paths.
-
-## 3. Extract your game data
+## 4. Extract your game data
 
 From the repository root:
 
@@ -68,28 +77,21 @@ The executable can also perform this extraction at first run. The Python tool
 is useful for preparing a build because code generation needs `default.xex`
 before the game starts.
 
-## 4. Generate the project
+## 5. Generate the project
 
 The checked-in `project/pes6_manifest.toml` expects the game at `../game`.
 It also includes the function and switch-table inputs in `project/`.
 
 ```bash
 cd project
-cp CMakeUserPresets.json.example CMakeUserPresets.json
-```
-
-Edit `CMakeUserPresets.json` and set `CMAKE_PREFIX_PATH` to the install path
-from step 2. Then run codegen:
-
-```bash
-C:/path/to/rexglue-sdk/out/install/win-amd64/bin/rexglue.exe \
+../rexglue-sdk/out/install/win-amd64-local/bin/rexglue.exe \
     codegen pes6_manifest.toml --ignore-stamp
 ```
 
 Codegen writes `project/generated/`. It is ignored by Git. The generated code
 is a derivative work of the game and must not be published.
 
-## 5. Build and run
+## 6. Build and run
 
 ```bash
 cmake --preset win-amd64-release-local
@@ -130,11 +132,9 @@ compiled products, and local analysis tools from the index.
 
 ## Troubleshooting
 
-- If CMake cannot find ReXGlue, check `CMAKE_PREFIX_PATH` in your local
-  `CMakeUserPresets.json`.
-- If CMake cannot find `clang`, add LLVM's `bin` directory to `PATH`, or set
-  `CMAKE_C_COMPILER` and `CMAKE_CXX_COMPILER` in
-  `CMakeUserPresets.json`.
+- If CMake cannot find ReXGlue, re-run `tools/configure_windows.py --force`.
+- If CMake cannot find `clang` or `rc.exe`, install LLVM and the Windows SDK,
+  then re-run the preset helper.
 - If `rexglue` cannot find the XEX, check `game_root` and `file_path` in
   `project/pes6_manifest.toml`, and confirm that `game/default.xex` exists.
 - If the game opens the setup dialog, select the extracted `game` folder, or

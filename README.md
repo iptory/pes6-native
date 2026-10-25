@@ -39,6 +39,7 @@ tested behavior and the remaining limits.
 - Visual Studio 2022 Build Tools with the Windows SDK.
 - Microsoft Visual C++ 2015-2022 Redistributable (x64) on the target machine.
 - LLVM/Clang, CMake 3.25 or newer, Ninja, and Python 3.11 or newer.
+- `tools/configure_windows.py` writes local presets for Clang and `rc.exe`.
 - The pinned ReXGlue SDK revision and the patch in `patches/`.
 
 A complete build is described in [BUILD.md](BUILD.md).
@@ -52,6 +53,7 @@ A complete build is described in [BUILD.md](BUILD.md).
 | `patches/rexglue-sdk.patch` | Required changes to the pinned ReXGlue revision |
 | `tools/xdvdfs_extract.py` | Extracts the XDVDFS partition from your ISO |
 | `tools/fix_libmspack_symlinks.py` | Fixes libmspack symlink stubs on Windows |
+| `tools/configure_windows.py` | Writes local CMake presets for Clang and `rc.exe` |
 | `tools/check_public_tree.py` | Rejects game data and build output in Git |
 | `LEGAL.md` | Distribution policy and legal notes |
 | `THIRD_PARTY_NOTICES.md` | Upstream licenses and notices |
@@ -65,15 +67,13 @@ git checkout c94f5ebdcb3c9d1a460ca48e04f9758448f8d518
 git submodule update --init --recursive
 git apply ../patches/rexglue-sdk.patch
 python ../tools/fix_libmspack_symlinks.py .
-cmake --preset win-amd64
-cmake --build --preset win-amd64-release --target install
 cd ..
+python tools/configure_windows.py
+cmake --preset win-amd64-local
+cmake --build --preset win-amd64-local-release --target install
 python tools/xdvdfs_extract.py PES6.iso game
 cd project
-cp CMakeUserPresets.json.example CMakeUserPresets.json
-# Edit CMAKE_PREFIX_PATH in CMakeUserPresets.json to point at
-# rexglue-sdk/out/install/win-amd64.
-/path/to/rexglue-sdk/out/install/win-amd64/bin/rexglue.exe codegen pes6_manifest.toml --ignore-stamp
+../rexglue-sdk/out/install/win-amd64-local/bin/rexglue.exe codegen pes6_manifest.toml --ignore-stamp
 cmake --preset win-amd64-release-local
 cmake --build --preset win-amd64-release-local
 ```
