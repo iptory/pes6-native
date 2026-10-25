@@ -28,6 +28,8 @@ build logs.
 | Settings | The F5 overlay, controller navigation, presets, and save-to-config build and run |
 | Presentation | D3D12 presenter logged the waitable swap chain with a maximum frame latency of 1 |
 | Window | Title reads `Pro Evolution Soccer 2006`; a local title icon was applied through the native window handle |
+| Multi-user sign-in | Users 0-3 and any-user sign-in queries now report the configured Live state; profile-backed storage works regardless of the checked index |
+| Multi-controller keyboard | The keyboard dialog merges all four input-system user states, so any connected controller can drive selection and text entry |
 | Settings | A valid `resolution_scale = 4` config reloaded as 4; TOML path escaping was fixed; F5 and shutdown saves write a parseable config |
 | Save flow | With `xam_signin_state = 2`, boot reached storage prompt, the local device was selected, and Save System Data completed after choosing Yes; `savegame.txt` mtime advanced |
 | Frame timer | Repeated `[timing]` records reported 59.95 to 60.08 fps in test runs |

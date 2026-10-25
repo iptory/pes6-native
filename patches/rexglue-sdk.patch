@@ -579,15 +579,21 @@ index 80c3634..ae63478 100644
  
  // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputsetstate(v=vs.85).aspx
 diff --git a/src/kernel/xam/xam_ui.cpp b/src/kernel/xam/xam_ui.cpp
-index 5a572ce..dac7087 100644
+index 5a572ce..a599bd1 100644
 --- a/src/kernel/xam/xam_ui.cpp
 +++ b/src/kernel/xam/xam_ui.cpp
-@@ -17,6 +17,12 @@
+@@ -13,10 +13,18 @@
+ #include <rex/runtime.h>
+ #include <rex/string.h>
+ #include <rex/system/flags.h>
++#include <rex/input/input_system.h>
+ #include <rex/system/kernel_state.h>
  
  #include <imgui.h>
  
 +#include <chrono>
 +#include <cctype>
++#include <cstdlib>
 +#include <cstring>
 +#include <string>
 +#include <vector>
@@ -595,7 +601,7 @@ index 5a572ce..dac7087 100644
  REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
                      "Don't display any UI, using defaults for prompts as needed");
  #include <rex/kernel/xam/private.h>
-@@ -366,6 +372,7 @@ class KeyboardInputDialog : public XamDialog {
+@@ -366,6 +374,7 @@ class KeyboardInputDialog : public XamDialog {
    bool cancelled() const { return cancelled_; }
  
    void OnDraw(ImGuiIO& io) override {
@@ -603,7 +609,7 @@ index 5a572ce..dac7087 100644
      bool first_draw = false;
      if (!has_opened_) {
        ImGui::OpenPopup(title_.c_str());
-@@ -373,6 +380,7 @@ class KeyboardInputDialog : public XamDialog {
+@@ -373,6 +382,7 @@ class KeyboardInputDialog : public XamDialog {
        first_draw = true;
      }
      if (ImGui::BeginPopupModal(title_.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -611,7 +617,7 @@ index 5a572ce..dac7087 100644
        if (description_.size()) {
          ImGui::TextWrapped("%s", description_.c_str());
        }
-@@ -381,25 +389,21 @@ class KeyboardInputDialog : public XamDialog {
+@@ -381,25 +391,21 @@ class KeyboardInputDialog : public XamDialog {
        }
        if (ImGui::InputText("##body", text_buffer_.data(), text_buffer_.size(),
                             ImGuiInputTextFlags_EnterReturnsTrue)) {
@@ -648,7 +654,7 @@ index 5a572ce..dac7087 100644
        ImGui::EndPopup();
      } else {
        Close();
-@@ -407,6 +411,331 @@ class KeyboardInputDialog : public XamDialog {
+@@ -407,6 +413,312 @@ class KeyboardInputDialog : public XamDialog {
    }
  
   private:
@@ -846,47 +852,26 @@ index 5a572ce..dac7087 100644
 +
 +  void PollController() {
 +#ifdef _WIN32
-+    // Avoid including XInput.h: ReXGlue's guest type headers deliberately
-+    // shadow several Windows SLIST types. Load the XInput entry point
-+    // dynamically and use the documented XINPUT_STATE layout instead.
-+    struct GamepadState {
-+      WORD buttons;
-+      BYTE left_trigger;
-+      BYTE right_trigger;
-+      SHORT thumb_lx;
-+      SHORT thumb_ly;
-+      SHORT thumb_rx;
-+      SHORT thumb_ry;
-+    };
-+    struct ControllerState {
-+      DWORD packet_number;
-+      GamepadState gamepad;
-+    };
-+    using XInputGetStateFn = DWORD(WINAPI*)(DWORD, ControllerState*);
-+    static XInputGetStateFn get_state = []() -> XInputGetStateFn {
-+      HMODULE library = LoadLibraryW(L"xinput1_4.dll");
-+      if (!library) {
-+        library = LoadLibraryW(L"xinput9_1_0.dll");
-+      }
-+      if (!library) {
-+        return nullptr;
-+      }
-+      return reinterpret_cast<XInputGetStateFn>(
-+          GetProcAddress(library, "XInputGetState"));
-+    }();
-+    if (!get_state) {
-+      previous_buttons_ = 0;
-+      last_dx_ = 0;
-+      last_dy_ = 0;
-+      return;
-+    }
-+
-+    ControllerState state{};
++    const auto* emulator = REX_KERNEL_STATE()->emulator();
++    auto* input = static_cast<rex::input::InputSystem*>(emulator->input_system());
 +    bool connected = false;
-+    for (DWORD controller_index = 0; controller_index < 4; ++controller_index) {
-+      if (get_state(controller_index, &state) == 0) {
++    WORD merged_buttons = 0;
++    SHORT merged_lx = 0;
++    SHORT merged_ly = 0;
++    if (input) {
++      for (uint32_t controller_index = 0; controller_index < 4; ++controller_index) {
++        rex::input::X_INPUT_STATE state{};
++        if (input->GetState(controller_index, &state) != X_ERROR_SUCCESS) {
++          continue;
++        }
 +        connected = true;
-+        break;
++        merged_buttons |= static_cast<WORD>(state.gamepad.buttons);
++        if (std::abs(int(state.gamepad.thumb_lx)) > std::abs(int(merged_lx))) {
++          merged_lx = static_cast<SHORT>(state.gamepad.thumb_lx);
++        }
++        if (std::abs(int(state.gamepad.thumb_ly)) > std::abs(int(merged_ly))) {
++          merged_ly = static_cast<SHORT>(state.gamepad.thumb_ly);
++        }
 +      }
 +    }
 +    if (!connected) {
@@ -908,7 +893,7 @@ index 5a572ce..dac7087 100644
 +    constexpr WORD kDpadRight = 0x0008;
 +    constexpr SHORT kDeadzone = 7849;
 +
-+    const WORD buttons = state.gamepad.buttons;
++    const WORD buttons = merged_buttons;
 +    const auto pressed = [&](WORD mask) {
 +      return (buttons & mask) != 0 && (previous_buttons_ & mask) == 0;
 +    };
@@ -948,14 +933,14 @@ index 5a572ce..dac7087 100644
 +    } else if (buttons & kDpadDown) {
 +      dy = 1;
 +    }
-+    if (state.gamepad.thumb_lx < -kDeadzone) {
++    if (merged_lx < -kDeadzone) {
 +      dx = -1;
-+    } else if (state.gamepad.thumb_lx > kDeadzone) {
++    } else if (merged_lx > kDeadzone) {
 +      dx = 1;
 +    }
-+    if (state.gamepad.thumb_ly > kDeadzone) {
++    if (merged_ly > kDeadzone) {
 +      dy = -1;
-+    } else if (state.gamepad.thumb_ly < -kDeadzone) {
++    } else if (merged_ly < -kDeadzone) {
 +      dy = 1;
 +    }
 +
@@ -974,13 +959,15 @@ index 5a572ce..dac7087 100644
 +      next_repeat_ = now;
 +    }
 +    previous_buttons_ = buttons;
++#else
++    (void)0;
 +#endif
 +  }
 +
    bool has_opened_ = false;
    std::string title_;
    std::string description_;
-@@ -415,6 +744,15 @@ class KeyboardInputDialog : public XamDialog {
+@@ -415,6 +727,15 @@ class KeyboardInputDialog : public XamDialog {
    std::vector<char> text_buffer_;
    std::string text_ = "";
    bool cancelled_ = true;
@@ -996,7 +983,7 @@ index 5a572ce..dac7087 100644
  };
  
  // https://www.se7ensins.com/forums/threads/release-how-to-use-xshowkeyboardui-release.906568/
-@@ -507,6 +845,7 @@ u32 XamShowDeviceSelectorUI_entry(u32 user_index, u32 content_type, u32 content_
+@@ -507,6 +828,7 @@ u32 XamShowDeviceSelectorUI_entry(u32 user_index, u32 content_type, u32 content_
                  uint32_t(user_index), uint32_t(content_type), uint32_t(content_flags),
                  uint64_t(total_requested), device_id_ptr.guest_address(),
                  overlapped.guest_address());
@@ -1005,18 +992,81 @@ index 5a572ce..dac7087 100644
        [device_id_ptr]() -> X_RESULT {
          // NOTE: 0x00000001 is our dummy device ID from xam_content.cc
 diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
-index 8778066..6ef70ca 100644
+index 8778066..58965cf 100644
 --- a/src/kernel/xam/xam_user.cpp
 +++ b/src/kernel/xam/xam_user.cpp
-@@ -73,6 +73,8 @@ u32 XamUserGetSigninState_entry(u32 user_index) {
-       signin_state = user_profile->signin_state();
+@@ -45,18 +45,11 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
+   uint32_t result = X_E_NO_SUCH_USER;
+   uint64_t xuid = 0;
+   if (user_index < 4) {
+-    if (user_index == 0) {
+-      const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+-      auto type = user_profile->type() & type_mask;
+-      if (type & (2 | 4)) {
+-        // maybe online profile?
+-        xuid = user_profile->xuid();
+-        result = X_E_SUCCESS;
+-      } else if (type & 1) {
+-        // maybe offline profile?
+-        xuid = user_profile->xuid();
+-        result = X_E_SUCCESS;
+-      }
++    const auto& user_profile = REX_KERNEL_STATE()->user_profile();
++    auto type = user_profile->type() & type_mask;
++    if (type & (1 | 2 | 4)) {
++      xuid = user_profile->xuid();
++      result = X_E_SUCCESS;
      }
+   } else {
+     result = X_E_INVALIDARG;
+@@ -67,12 +60,11 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
+ 
+ u32 XamUserGetSigninState_entry(u32 user_index) {
+   uint32_t signin_state = 0;
+-  if (user_index < 4) {
+-    if (user_index == 0) {
+-      const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+-      signin_state = user_profile->signin_state();
+-    }
++  if (user_index < 4 || user_index == 0xFF) {
++    signin_state = REX_KERNEL_STATE()->user_profile()->signin_state();
    }
 +  REXKRNL_DEBUG("XamUserGetSigninState({}) -> {}", uint32_t(user_index),
 +                signin_state);
    return signin_state;
  }
  
+@@ -92,7 +84,7 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
+   }
+ 
+   std::memset(info, 0, sizeof(X_USER_SIGNIN_INFO));
+-  if (user_index) {
++  if (user_index >= 4) {
+     return X_E_NO_SUCH_USER;
+   }
+ 
+@@ -108,10 +100,6 @@ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
+     return X_E_INVALIDARG;
+   }
+ 
+-  if (user_index) {
+-    return X_E_NO_SUCH_USER;
+-  }
+-
+   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+   const auto& user_name = user_profile->name();
+   rex::string::copy_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
+@@ -123,10 +111,6 @@ u32 XamUserGetGamerTag_entry(u32 user_index, mapped_wstring buffer, u32 buffer_l
+     return X_E_INVALIDARG;
+   }
+ 
+-  if (user_index) {
+-    return X_E_NO_SUCH_USER;
+-  }
+-
+   if (!buffer || buffer_len < 16) {
+     return X_E_INVALIDARG;
+   }
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_video.cpp b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
 index 1254710..6e04093 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_video.cpp

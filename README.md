@@ -116,8 +116,9 @@ prefetch, and waitable-swap-chain latency. F5 writes them to `pes6.toml` next to
 the executable. Path values are escaped correctly, so they reload after a
 restart. Closing the overlay also saves the current values.
 
-`xam_signin_state` defaults to `2` so PES6 treats user 0 as signed in to Xbox
-Live and enables profile-backed storage. On boot, press Start, then confirm the
+`xam_signin_state` defaults to `2` so PES6 treats users 0-3, and any-user
+queries, as signed in to Xbox Live. This enables profile-backed storage even
+when the game checks a controller-specific user index. On boot, press Start, then confirm the
 storage device once. The runtime selects its local HDD automatically. When the
 game asks to overwrite System, Cup, League, formation, or Edit data, choose
 **Yes**. PES6 often focuses **No** by default, so press Up and then A.
