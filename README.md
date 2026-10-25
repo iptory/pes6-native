@@ -112,12 +112,31 @@ Player Settings for local multiplayer. Game text entry uses the Xbox 360
 
 Settings cover VSync, resolution scale, 2x MSAA, anisotropic filtering,
 presentation filtering, texture-cache limits, shader-cache persistence, data
-prefetch, and waitable-swap-chain latency. These are host options. They do not
-change the game's own System Settings.
+prefetch, and waitable-swap-chain latency. F5 writes them to `pes6.toml` next to
+the executable. Path values are escaped correctly, so they reload after a
+restart. Closing the overlay also saves the current values.
 
-Saves are written under `%USERPROFILE%\Documents\pes6`. Use the game's
-**SYSTEM SETTINGS** menu for the original options. Historical Xbox Live
+`xam_signin_state` defaults to `2` so PES6 treats user 0 as signed in to Xbox
+Live and enables profile-backed storage. On boot, press Start, then confirm the
+storage device once. The runtime selects its local HDD automatically. When the
+game asks to overwrite System, Cup, League, formation, or Edit data, choose
+**Yes**. PES6 often focuses **No** by default, so press Up and then A.
+
+Saves are written under `%USERPROFILE%\Documents\pes6`. Historical Xbox Live
 services are unavailable.
+
+## Output resolution
+
+The guest still renders its original 1280x720 framebuffer. The resolution
+scale option multiplies that internal framebuffer, so 2x renders at 2560x1440
+and 4x renders at 5120x2880 before presentation. It is real supersampling, not
+a stretched 720p image, but it is not a native 1080p guest framebuffer. Use 2x
+for 1080p output on a 1080p display, and 1x if the GPU cannot hold 60 fps.
+
+The window title is set to **Pro Evolution Soccer 2006**. If a local
+`title.ico` is placed next to the executable or in the game data folder, the
+original title icon is applied. The icon is extracted from the user's own game
+file and is not part of this repository.
 
 ## Development checks
 

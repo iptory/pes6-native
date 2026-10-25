@@ -27,6 +27,10 @@ build logs.
 | Saves | System Data, Cup, League, and Edit saves were written and reloaded after restart |
 | Settings | The F5 overlay, controller navigation, presets, and save-to-config build and run |
 | Presentation | D3D12 presenter logged the waitable swap chain with a maximum frame latency of 1 |
+| Window | Title reads `Pro Evolution Soccer 2006`; a local title icon was applied through the native window handle |
+| Settings | A valid `resolution_scale = 4` config reloaded as 4; TOML path escaping was fixed; F5 and shutdown saves write a parseable config |
+| Save flow | With `xam_signin_state = 2`, boot reached storage prompt, the local device was selected, and Save System Data completed after choosing Yes; `savegame.txt` mtime advanced |
+| Frame timer | Repeated `[timing]` records reported 59.95 to 60.08 fps in test runs |
 | Shader cache | 75 shaders and 132 graphics pipelines loaded from persistent storage at startup |
 | Package smoke test | The built executable with its runtime DLLs booted the intro with an external game-data path |
 | Clean-tree build | A detached worktree containing only the tracked files configured, generated, built, and booted with `rexgpu-xenos.dll` staged by the build |

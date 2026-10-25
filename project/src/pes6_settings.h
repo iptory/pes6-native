@@ -30,12 +30,12 @@ class Pes6SettingsDialog final : public rex::ui::ImGuiDialog {
   bool DrawInt(const char* name, const char* label, int minimum, int maximum);
   bool DrawCombo(const char* name, const char* label,
                  const char* const* items, int item_count);
-  bool Set(const char* name, std::string_view value);
   void ApplyPreset(bool quality);
 
   std::filesystem::path config_path_;
   bool open_ = true;
   bool saved_ = false;
+  bool dirty_ = false;
   uint64_t previous_buttons_ = 0;
   int last_dx_ = 0;
   int last_dy_ = 0;

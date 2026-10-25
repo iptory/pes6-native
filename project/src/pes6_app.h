@@ -1,7 +1,17 @@
 #pragma once
 
+#include <array>
 #include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iterator>
 #include <memory>
+#include <optional>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
@@ -40,7 +50,26 @@ class Pes6App : public rex::ReXApp {
     config_path_ = paths.config_path;
   }
 
+  std::optional<rex::PathConfig> OnFinalizePaths(
+      const rex::PathConfig& defaults,
+      std::function<void(rex::PathConfig)> resume) override {
+    (void)resume;
+    // GPU plugin cvars register after SetupEnvironment loads the config.
+    // Reload now so resolution, filtering, and cache options apply before the
+    // runtime creates its graphics objects.
+    if (!config_path_.empty()) {
+      rex::cvar::LoadConfig(config_path_);
+      // Normalize older configs that wrote raw Windows paths.
+      rex::cvar::SaveConfig(config_path_);
+    }
+    return defaults;
+  }
+
   void OnPostSetup() override {
+    if (window()) {
+      window()->SetTitle("Pro Evolution Soccer 2006");
+      ApplyWindowIcon();
+    }
     pes6::StartGameDataPrefetch(game_data_root_);
   }
 
@@ -57,8 +86,21 @@ class Pes6App : public rex::ReXApp {
   }
 
   void OnShutdown() override {
+    if (!config_path_.empty()) {
+      rex::cvar::SaveConfig(config_path_);
+    }
     settings_.reset();
     pes6::StopGameDataPrefetch();
+#ifdef _WIN32
+    if (window_icon_big_) {
+      DestroyIcon(window_icon_big_);
+      window_icon_big_ = nullptr;
+    }
+    if (window_icon_small_) {
+      DestroyIcon(window_icon_small_);
+      window_icon_small_ = nullptr;
+    }
+#endif
   }
 
   void OnPreSetup(rex::RuntimeConfig& config) override {
@@ -69,7 +111,46 @@ class Pes6App : public rex::ReXApp {
   }
 
  private:
+  void ApplyWindowIcon() {
+#ifdef _WIN32
+    HWND hwnd = static_cast<HWND>(window()->GetNativeWindowHandle());
+    if (!hwnd) {
+      return;
+    }
+    const auto exe_dir = rex::filesystem::GetExecutableFolder();
+    const std::array<std::filesystem::path, 4> candidates = {
+        exe_dir / "title.ico",
+        game_data_root_ / "title.ico",
+        game_data_root_ / "icons" / "title.ico",
+        exe_dir / "icons" / "title.ico",
+    };
+    for (const auto& path : candidates) {
+      HICON big = static_cast<HICON>(LoadImageW(
+          nullptr, path.c_str(), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
+          GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE));
+      if (!big) {
+        continue;
+      }
+      HICON small_icon = static_cast<HICON>(LoadImageW(
+          nullptr, path.c_str(), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+          GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE));
+      SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
+      if (small_icon) {
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL,
+                     reinterpret_cast<LPARAM>(small_icon));
+      }
+      window_icon_big_ = big;
+      window_icon_small_ = small_icon;
+      return;
+    }
+#endif
+  }
+
   std::filesystem::path game_data_root_;
   std::filesystem::path config_path_;
+#ifdef _WIN32
+  HICON window_icon_big_ = nullptr;
+  HICON window_icon_small_ = nullptr;
+#endif
   std::unique_ptr<pes6::Pes6SettingsDialog> settings_;
 };

@@ -49,3 +49,6 @@ __pycache__/
 # Local captures, logs, and diagnostic output.
 *.log
 /captures/
+
+# Original game icon is user-supplied and stays local.
+*.ico

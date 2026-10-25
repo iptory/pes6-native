@@ -113,13 +113,10 @@ Pes6SettingsDialog::Pes6SettingsDialog(rex::ui::ImGuiDrawer* imgui_drawer,
                                        std::filesystem::path config_path)
     : ImGuiDialog(imgui_drawer), config_path_(std::move(config_path)) {}
 
-Pes6SettingsDialog::~Pes6SettingsDialog() = default;
-
-bool Pes6SettingsDialog::Set(const char* name, std::string_view value) {
-  if (const auto* entry = FindFlag(name)) {
-    return entry->setter(value);
+Pes6SettingsDialog::~Pes6SettingsDialog() {
+  if (!config_path_.empty()) {
+    rex::cvar::SaveConfig(config_path_);
   }
-  return false;
 }
 
 bool Pes6SettingsDialog::DrawBool(const char* name, const char* label) {
@@ -139,7 +136,8 @@ bool Pes6SettingsDialog::DrawBool(const char* name, const char* label) {
                       LifecycleBadge(*entry).c_str());
   }
   if (changed && editable) {
-    entry->setter(value ? "true" : "false");
+    rex::cvar::SetFlagByName(name, value ? "true" : "false");
+    dirty_ = true;
   }
   ImGui::PopID();
   if (!editable) {
@@ -171,7 +169,8 @@ bool Pes6SettingsDialog::DrawInt(const char* name, const char* label,
                       LifecycleBadge(*entry).c_str());
   }
   if (changed && editable) {
-    entry->setter(std::to_string(value));
+    rex::cvar::SetFlagByName(name, std::to_string(value));
+    dirty_ = true;
   }
   ImGui::PopID();
   if (!editable) {
@@ -210,7 +209,8 @@ bool Pes6SettingsDialog::DrawCombo(const char* name, const char* label,
                       LifecycleBadge(*entry).c_str());
   }
   if (changed && editable) {
-    entry->setter(items[current]);
+    rex::cvar::SetFlagByName(name, items[current]);
+    dirty_ = true;
   }
   ImGui::PopID();
   if (!editable) {
@@ -229,8 +229,9 @@ void Pes6SettingsDialog::ApplyPreset(bool quality) {
                                : (sizeof(kPerformancePreset) /
                                   sizeof(kPerformancePreset[0]));
   for (size_t i = 0; i < count; ++i) {
-    Set(values[i].name, values[i].value);
+    rex::cvar::SetFlagByName(values[i].name, values[i].value);
   }
+  dirty_ = true;
   saved_ = false;
 }
 
@@ -466,6 +467,11 @@ void Pes6SettingsDialog::OnDraw(ImGuiIO& io) {
   ImGui::Separator();
   if (ImGui::Button("Save settings", ImVec2(160, 0))) {
     rex::cvar::SaveConfig(config_path_);
+    dirty_ = false;
+    saved_ = true;
+  } else if (dirty_ && !ImGui::IsAnyItemActive()) {
+    rex::cvar::SaveConfig(config_path_);
+    dirty_ = false;
     saved_ = true;
   }
   ImGui::SameLine();

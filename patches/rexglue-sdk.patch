@@ -47,6 +47,27 @@ index c8751b7..26e5a69 100644
  
    // Packet number incremented on state change
    uint32_t packet_number_ = 0;
+diff --git a/include/rex/system/xam/user_profile.h b/include/rex/system/xam/user_profile.h
+index ec37017..8e5b461 100644
+--- a/include/rex/system/xam/user_profile.h
++++ b/include/rex/system/xam/user_profile.h
+@@ -18,6 +18,7 @@
+ 
+ #include <fmt/format.h>
+ 
++#include <rex/cvar.h>
+ #include <rex/memory.h>
+ #include <rex/stream.h>
+ #include <rex/system/xtypes.h>
+@@ -218,7 +219,7 @@ class UserProfile {
+ 
+   uint64_t xuid() const { return xuid_; }
+   std::string name() const { return name_; }
+-  uint32_t signin_state() const { return 1; }
++  uint32_t signin_state() const;
+   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
+ 
+   void set_kernel_state(KernelState* ks) { kernel_state_ = ks; }
 diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
 index 83d09f7..a756a85 100644
 --- a/include/rex/ui/d3d12/d3d12_presenter.h
@@ -78,6 +99,62 @@ index 20a2cd8..2e7829d 100644
    {
      std::unique_lock<std::mutex> guard(frames_mutex_);
      frames_queued_.push(output_frame);
+diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
+index 228728d..018649a 100644
+--- a/src/core/cvar.cpp
++++ b/src/core/cvar.cpp
+@@ -535,13 +535,41 @@ std::vector<std::string> ListModifiedFlags() {
+   return result;
+ }
+ 
++std::string EscapeTomlString(std::string_view value) {
++  std::string result;
++  result.reserve(value.size() + 8);
++  for (char c : value) {
++    switch (c) {
++      case '\\':
++        result += "\\\\";
++        break;
++      case '"':
++        result += "\\\"";
++        break;
++      case '\n':
++        result += "\\n";
++        break;
++      case '\r':
++        result += "\\r";
++        break;
++      case '\t':
++        result += "\\t";
++        break;
++      default:
++        result += c;
++        break;
++    }
++  }
++  return result;
++}
++
+ std::string SerializeToTOML() {
+   std::lock_guard lock(GetRegistryMutex());
+   std::string result;
+   for (const auto& entry : GetRegistryStorage()) {
+     if (entry.getter() != entry.default_value) {
+       if (entry.type == FlagType::String) {
+-        result += entry.name + " = \"" + entry.getter() + "\"\n";
++        result += entry.name + " = \"" + EscapeTomlString(entry.getter()) + "\"\n";
+       } else {
+         result += entry.name + " = " + entry.getter() + "\n";
+       }
+@@ -556,7 +584,7 @@ std::string SerializeToTOML(std::string_view category) {
+   for (const auto& entry : GetRegistryStorage()) {
+     if (entry.category == category && entry.getter() != entry.default_value) {
+       if (entry.type == FlagType::String) {
+-        result += entry.name + " = \"" + entry.getter() + "\"\n";
++        result += entry.name + " = \"" + EscapeTomlString(entry.getter()) + "\"\n";
+       } else {
+         result += entry.name + " = " + entry.getter() + "\n";
+       }
 diff --git a/src/filesystem/virtual_file_system.cpp b/src/filesystem/virtual_file_system.cpp
 index a1b4dad..a9f37dd 100644
 --- a/src/filesystem/virtual_file_system.cpp
@@ -444,6 +521,30 @@ index 3f9422d..c4fcb94 100644
  }
  
  void MnkInputDriver::OnMouseDown(rex::ui::MouseEvent& e) {
+diff --git a/src/kernel/xam/xam_content.cpp b/src/kernel/xam/xam_content.cpp
+index 1fb1e16..9acaf0d 100644
+--- a/src/kernel/xam/xam_content.cpp
++++ b/src/kernel/xam/xam_content.cpp
+@@ -136,6 +136,10 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+   }
+ 
+   auto content_manager = REX_KERNEL_STATE()->content_manager();
++  REXKRNL_DEBUG(
++      "XamContentCreate: user={} root={} type={:08X} device={} file={} flags={:08X}",
++      uint32_t(user_index), root_name.value(), uint32_t(content_data.content_type.get()),
++      uint32_t(content_data.device_id.get()), content_data.file_name(), uint32_t(flags));
+ 
+   if (overlapped_ptr && disposition_ptr) {
+     *disposition_ptr = 0;
+@@ -224,6 +228,8 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
+       *disposition_ptr = static_cast<uint32_t>(disposition);
+     }
+ 
++    REXKRNL_DEBUG("XamContentCreate: root={} result={:08X} disposition={}",
++                 root_name, uint32_t(result), uint32_t(disposition));
+     extended_error = X_HRESULT_FROM_WIN32(result);
+     length = static_cast<uint32_t>(disposition);
+     return result;
 diff --git a/src/kernel/xam/xam_input.cpp b/src/kernel/xam/xam_input.cpp
 index 80c3634..ae63478 100644
 --- a/src/kernel/xam/xam_input.cpp
@@ -478,7 +579,7 @@ index 80c3634..ae63478 100644
  
  // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputsetstate(v=vs.85).aspx
 diff --git a/src/kernel/xam/xam_ui.cpp b/src/kernel/xam/xam_ui.cpp
-index 5a572ce..bc33057 100644
+index 5a572ce..dac7087 100644
 --- a/src/kernel/xam/xam_ui.cpp
 +++ b/src/kernel/xam/xam_ui.cpp
 @@ -17,6 +17,12 @@
@@ -547,7 +648,7 @@ index 5a572ce..bc33057 100644
        ImGui::EndPopup();
      } else {
        Close();
-@@ -407,6 +411,319 @@ class KeyboardInputDialog : public XamDialog {
+@@ -407,6 +411,331 @@ class KeyboardInputDialog : public XamDialog {
    }
  
   private:
@@ -716,6 +817,8 @@ index 5a572ce..bc33057 100644
 +
 +  void InsertCharacter(char character) {
 +    const size_t length = std::strlen(text_buffer_.data());
++    REXKRNL_DEBUG("Keyboard: insert '{}' length={} capacity={}", character,
++                  length, text_buffer_.size());
 +    if (length + 1 < text_buffer_.size()) {
 +      text_buffer_[length] = character;
 +      text_buffer_[length + 1] = '\0';
@@ -779,7 +882,14 @@ index 5a572ce..bc33057 100644
 +    }
 +
 +    ControllerState state{};
-+    if (get_state(0, &state) != 0) {
++    bool connected = false;
++    for (DWORD controller_index = 0; controller_index < 4; ++controller_index) {
++      if (get_state(controller_index, &state) == 0) {
++        connected = true;
++        break;
++      }
++    }
++    if (!connected) {
 +      previous_buttons_ = 0;
 +      last_dx_ = 0;
 +      last_dy_ = 0;
@@ -804,9 +914,12 @@ index 5a572ce..bc33057 100644
 +    };
 +
 +    if (pressed(kA)) {
++      REXKRNL_DEBUG("Keyboard: A activate row={} col={}", selected_row_,
++                    selected_col_);
 +      ActivateSelection();
 +    }
 +    if (pressed(kB)) {
++      REXKRNL_DEBUG("Keyboard: B backspace");
 +      Backspace();
 +    }
 +    if (pressed(kStart)) {
@@ -867,7 +980,7 @@ index 5a572ce..bc33057 100644
    bool has_opened_ = false;
    std::string title_;
    std::string description_;
-@@ -415,6 +732,15 @@ class KeyboardInputDialog : public XamDialog {
+@@ -415,6 +744,15 @@ class KeyboardInputDialog : public XamDialog {
    std::vector<char> text_buffer_;
    std::string text_ = "";
    bool cancelled_ = true;
@@ -883,6 +996,27 @@ index 5a572ce..bc33057 100644
  };
  
  // https://www.se7ensins.com/forums/threads/release-how-to-use-xshowkeyboardui-release.906568/
+@@ -507,6 +845,7 @@ u32 XamShowDeviceSelectorUI_entry(u32 user_index, u32 content_type, u32 content_
+                 uint32_t(user_index), uint32_t(content_type), uint32_t(content_flags),
+                 uint64_t(total_requested), device_id_ptr.guest_address(),
+                 overlapped.guest_address());
++  REXKRNL_DEBUG("XamShowDeviceSelectorUI: auto-selecting device 1");
+   return xeXamDispatchHeadless(
+       [device_id_ptr]() -> X_RESULT {
+         // NOTE: 0x00000001 is our dummy device ID from xam_content.cc
+diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
+index 8778066..6ef70ca 100644
+--- a/src/kernel/xam/xam_user.cpp
++++ b/src/kernel/xam/xam_user.cpp
+@@ -73,6 +73,8 @@ u32 XamUserGetSigninState_entry(u32 user_index) {
+       signin_state = user_profile->signin_state();
+     }
+   }
++  REXKRNL_DEBUG("XamUserGetSigninState({}) -> {}", uint32_t(user_index),
++                signin_state);
+   return signin_state;
+ }
+ 
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_video.cpp b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
 index 1254710..6e04093 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_video.cpp
@@ -915,6 +1049,43 @@ index 1254710..6e04093 100644
    // All of these parameters are REQUIRED.
    assert(buffer_ptr);
    assert(fetch_ptr);
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index bd6c797..9ad4153 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -265,6 +265,8 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name, uint64_
+   }
+ 
+   auto package_path = ResolvePackagePath(xuid, data);
++  REXSYS_DEBUG("CreateContent: root={} path={}", root_name,
++               rex::path_to_utf8(package_path));
+   if (std::filesystem::exists(package_path)) {
+     return X_ERROR_ALREADY_EXISTS;
+   }
+diff --git a/src/system/xam/user_profile.cpp b/src/system/xam/user_profile.cpp
+index a77f5e6..41f27ba 100644
+--- a/src/system/xam/user_profile.cpp
++++ b/src/system/xam/user_profile.cpp
+@@ -17,10 +17,19 @@
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xam/user_profile.h>
+ 
++REXCVAR_DEFINE_INT32(xam_signin_state, 2, "Kernel",
++                     "Xbox 360 user 0 sign-in state: 1 = local, 2 = Xbox Live")
++    .range(1, 2);
++
+ namespace rex {
+ namespace system {
+ namespace xam {
+ 
++uint32_t UserProfile::signin_state() const {
++  // PES6 requires the Live signed-in state to enable profile-backed storage.
++  return static_cast<uint32_t>(REXCVAR_GET(xam_signin_state));
++}
++
+ UserProfile::UserProfile() {
+   // 58410A1F checks the user XUID against a mask of 0x00C0000000000000 (3<<54),
+   // if non-zero, it prevents the user from playing the game.
 diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
 index 306118e..f27e227 100644
 --- a/src/ui/d3d12/d3d12_presenter.cpp
