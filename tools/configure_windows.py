@@ -90,6 +90,9 @@ def main():
     }
     write_presets(sdk / "CMakeUserPresets.json", sdk_presets, args.force)
 
+    project_compilers = {
+        name: value for name, value in compilers.items() if name != "CMAKE_C_COMPILER"
+    }
     project_presets = {
         "version": 6,
         "configurePresets": [
@@ -97,7 +100,7 @@ def main():
                 "name": "win-amd64-release-local",
                 "inherits": "win-amd64-release",
                 "cacheVariables": {
-                    **compilers,
+                    **project_compilers,
                     "CMAKE_PREFIX_PATH": (
                         sdk / "out/install/win-amd64-local"
                     ).as_posix(),

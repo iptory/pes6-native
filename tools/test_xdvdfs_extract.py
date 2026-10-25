@@ -11,7 +11,7 @@ class SafeComponentsTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             safe_components("../outside")
 
-    def test_rejects_windows_separator_and_drive(self):
+    def test_rejects_windows_separator(self):
         with self.assertRaises(RuntimeError):
             safe_components("data\\outside")
         with self.assertRaises(RuntimeError):

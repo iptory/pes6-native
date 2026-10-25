@@ -29,7 +29,7 @@ build logs.
 | Presentation | D3D12 presenter logged the waitable swap chain with a maximum frame latency of 1 |
 | Shader cache | 75 shaders and 132 graphics pipelines loaded from persistent storage at startup |
 | Package smoke test | The built executable with its runtime DLLs booted the intro with an external game-data path |
-| Clean-tree build | A detached worktree containing only the tracked files configured, generated, built, and booted after staging `rexgpu-xenos.dll` |
+| Clean-tree build | A detached worktree containing only the tracked files configured, generated, built, and booted with `rexgpu-xenos.dll` staged by the build |
 
 ## Known limits
 

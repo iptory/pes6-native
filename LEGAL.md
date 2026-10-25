@@ -21,6 +21,8 @@ of the game. This repository does not grant permission to distribute them.
 - A patch against a pinned ReXGlue revision.
 - An XDVDFS extractor that copies the game partition from a user's ISO.
 - Build and repository hygiene tools.
+- Function addresses, sizes, and switch-table facts used by code generation.
+  These are analysis metadata, not game instructions or game assets.
 
 The XDVDFS extractor does not decrypt the retail XEX. The build uses ReXGlue's
 public loader. No XEX decryption key is stored in this repository.
