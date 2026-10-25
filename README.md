@@ -37,6 +37,7 @@ tested behavior and the remaining limits.
 - A lawfully obtained PAL Xbox 360 copy of PES6. The tested disc image is the
   European release with title ID `4B4E07DA`.
 - Visual Studio 2022 Build Tools with the Windows SDK.
+- Microsoft Visual C++ 2015-2022 Redistributable (x64) on the target machine.
 - LLVM/Clang, CMake 3.25 or newer, Ninja, and Python 3.11 or newer.
 - The pinned ReXGlue SDK revision and the patch in `patches/`.
 

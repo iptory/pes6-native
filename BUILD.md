@@ -8,6 +8,7 @@ the extracted game, or a compiled executable.
 
 - Windows 10 19045 x64
 - Visual Studio 2022 17.12 with the Windows 10/11 SDK
+- Microsoft Visual C++ 2015-2022 Redistributable (x64) for running the build
 - LLVM/Clang 23.1.4 in `PATH`
 - CMake 4.3.1, Ninja 1.13
 - Python 3.13
@@ -108,7 +109,7 @@ path is saved in `%LOCALAPPDATA%\PES6Native\game_path.txt`.
 For a direct development launch:
 
 ```text
-pes6.exe --game_data_root=C:/path/to/360PES6TOPC/game
+pes6.exe --game_data_root=C:/path/to/game
 ```
 
 The first-run setup also accepts `PES6_SETUP_FOLDER` and `PES6_SETUP_ISO` for

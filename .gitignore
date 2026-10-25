@@ -33,15 +33,6 @@
 /rea/
 
 # Development-only analysis tools and records.
-/tools/auto_orphan_loop.py
-/tools/gen_gap_functions.py
-/tools/gen_orphans.py
-/tools/xex_unpack.py
-/tools/package.py
-/tools/__pycache__/
-/CHECKPOINT.md
-/project/PINNED_REVISIONS.md
-/project/seeds.json
 /project/CMakeUserPresets.json
 
 # Editor and OS files.
