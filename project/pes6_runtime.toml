@@ -1,4 +1,3 @@
-# Runtime-discovered indirect call targets.
 # Indirect-call targets discovered during bring-up; used by codegen.
 [functions]
 0x825BB640 = { name = "sub_825BB640", size = 0x40 }
