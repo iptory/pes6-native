@@ -131,6 +131,9 @@ compiled products, and local analysis tools from the index.
 
 - If CMake cannot find ReXGlue, check `CMAKE_PREFIX_PATH` in your local
   `CMakeUserPresets.json`.
+- If CMake cannot find `clang`, add LLVM's `bin` directory to `PATH`, or set
+  `CMAKE_C_COMPILER` and `CMAKE_CXX_COMPILER` in
+  `CMakeUserPresets.json`.
 - If `rexglue` cannot find the XEX, check `game_root` and `file_path` in
   `project/pes6_manifest.toml`, and confirm that `game/default.xex` exists.
 - If the game opens the setup dialog, select the extracted `game` folder, or

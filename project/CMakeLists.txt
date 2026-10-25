@@ -22,4 +22,4 @@ else()
     add_executable(pes6 ${PES6_SOURCES})
 endif()
 
-rexglue_setup_target(pes6)
+rexglue_setup_target(pes6 GPU_PLUGINS xenos)
