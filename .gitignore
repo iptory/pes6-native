@@ -1,0 +1,60 @@
+# Game data and extracted content. Never commit these.
+/PES6.iso
+/game/
+/work/
+*.iso
+*.xex
+*.xbe
+*.img
+*.wmv
+*.wma
+*.xma
+*.bin
+*.pkg
+
+# Build products and generated recompiled code.
+/dist/
+/build/
+/out/
+/project/generated/
+/project/out/
+*.dll
+*.exe
+*.lib
+*.obj
+*.pdb
+*.ilk
+*.exp
+
+# Third-party checkouts used locally. BUILD.md pins and fetches these.
+/rexglue-sdk/
+/rexlauncher/
+/xenia-canary/
+/rea/
+
+# Development-only analysis tools and records.
+/tools/auto_orphan_loop.py
+/tools/gen_gap_functions.py
+/tools/gen_orphans.py
+/tools/xex_unpack.py
+/tools/package.py
+/tools/__pycache__/
+/CHECKPOINT.md
+/project/PINNED_REVISIONS.md
+/project/seeds.json
+/project/CMakeUserPresets.json
+
+# Editor and OS files.
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+__pycache__/
+*.py[cod]
+
+# Local captures, logs, and diagnostic output.
+*.log
+/captures/

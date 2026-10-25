@@ -1,0 +1,10 @@
+# Runtime-discovered indirect call targets.
+# Indirect-call targets discovered during bring-up; used by codegen.
+[functions]
+0x825BB640 = { name = "sub_825BB640", size = 0x40 }
+0x825BCDD0 = { name = "sub_825BCDD0", size = 0x40 }
+0x826E8EA8 = { name = "sub_826E8EA8", size = 0x8 }
+0x826E8EB0 = { name = "sub_826E8EB0", size = 0x8 }
+0x826E8EB8 = { name = "sub_826E8EB8", size = 0x10 }
+0x826E8EC8 = { name = "sub_826E8EC8", size = 0x8 }
+0x82577278 = { name = "sub_82577278", size = 0x70 }

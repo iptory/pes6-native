@@ -1,0 +1,1064 @@
+diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
+index c8751b7..26e5a69 100644
+--- a/include/rex/input/mnk/mnk_input_driver.h
++++ b/include/rex/input/mnk/mnk_input_driver.h
+@@ -29,7 +29,14 @@ class MnkInputDriver final : public InputDriver,
+                              public rex::ui::WindowInputListener,
+                              public rex::ui::WindowListener {
+  public:
+-  explicit MnkInputDriver(rex::ui::Window* window, size_t window_z_order);
++  explicit MnkInputDriver(rex::ui::Window* window, size_t window_z_order, int player_index = 0);
++
++  enum BindIndex {
++    kA, kB, kX, kY, kLB, kRB, kLT, kRT, kLS, kRS, kBack, kStart, kGuide,
++    kDpadUp, kDpadDown, kDpadLeft, kDpadRight,
++    kLStickUp, kLStickDown, kLStickLeft, kLStickRight,
++    kRStickUp, kRStickDown, kRStickLeft, kRStickRight,
++  };
+   ~MnkInputDriver() override;
+ 
+   X_STATUS Setup() override;
+@@ -58,8 +65,10 @@ class MnkInputDriver final : public InputDriver,
+ 
+  private:
+   bool IsEnabled() const;
++  const std::string& BindValue(int index) const;
+   void SetKeyState(uint16_t vk, bool down);
+   void EnqueueKeystroke(uint16_t vk_pad, bool down);
++  void UpdatePadKeystrokesLocked();
+ 
+   // Called from the guest thread. The rest of the capture path stays on the UI
+   // thread, since every Window call in it reaches SDL.
+@@ -73,6 +82,8 @@ class MnkInputDriver final : public InputDriver,
+   // Only the UI thread writes it, so only guest thread access needs the lock.
+   rex::ui::Window* attached_window_ = nullptr;
+ 
++  int player_index_ = 0;
++  rex::input::DeviceId device_id = rex::input::DeviceId::kInvalid;
+   std::mutex state_mutex_;
+   bool key_down_[256] = {};
+ 
+@@ -101,6 +112,8 @@ class MnkInputDriver final : public InputDriver,
+ 
+   // Keystroke queue
+   std::queue<X_INPUT_KEYSTROKE> keystroke_queue_;
++  // Last reported pressed state per emulated pad button, for edge synthesis.
++  bool pad_pressed_[16] = {};
+ 
+   // Packet number incremented on state change
+   uint32_t packet_number_ = 0;
+diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
+index 83d09f7..a756a85 100644
+--- a/include/rex/ui/d3d12/d3d12_presenter.h
++++ b/include/rex/ui/d3d12/d3d12_presenter.h
+@@ -251,6 +251,8 @@ class D3D12Presenter final : public Presenter {
+     uint32_t swap_chain_width = 0;
+     uint32_t swap_chain_height = 0;
+     bool swap_chain_allows_tearing = false;
++    bool swap_chain_waitable = false;
++    HANDLE frame_latency_waitable = nullptr;
+     Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain;
+     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kSwapChainBufferCount> swap_chain_buffers;
+   };
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 20a2cd8..2e7829d 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -124,13 +124,6 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+ 
+   std::memcpy(output_frame, input_frame, frame_samples_ * sizeof(float));
+ 
+-  static uint32_t sdl_submit_count = 0;
+-  if (sdl_submit_count < 10) {
+-    REXAPU_DEBUG("SDLAudioDriver::SubmitFrame: frame_ptr={:08X} queued_count={}", frame_ptr,
+-                 frames_queued_.size() + 1);
+-    sdl_submit_count++;
+-  }
+-
+   {
+     std::unique_lock<std::mutex> guard(frames_mutex_);
+     frames_queued_.push(output_frame);
+diff --git a/src/filesystem/virtual_file_system.cpp b/src/filesystem/virtual_file_system.cpp
+index a1b4dad..a9f37dd 100644
+--- a/src/filesystem/virtual_file_system.cpp
++++ b/src/filesystem/virtual_file_system.cpp
+@@ -116,9 +116,24 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
+   }
+ 
+   // Find the device.
+-  auto it = std::find_if(devices_.cbegin(), devices_.cend(), [&](const auto& d) {
+-    return rex::string::utf8_starts_with_case(normalized_path, d->mount_path());
+-  });
++  auto find_device = [&](const std::string& candidate) {
++    return std::find_if(devices_.cbegin(), devices_.cend(), [&](const auto& d) {
++      return rex::string::utf8_starts_with_case(candidate, d->mount_path());
++    });
++  };
++  auto it = find_device(normalized_path);
++  if (it == devices_.cend() && normalized_path.find(':') == std::string::npos &&
++      !rex::string::utf8_starts_with_case(normalized_path, "\\")) {
++    // Several games address their own files as ".\name" (for example
++    // PES6's sysPadConfig.bin) instead of game:\name. Bind such relative
++    // paths to the game device before reporting a missing device.
++    const std::string fallback = "game:\\" + normalized_path;
++    std::string fallback_resolved;
++    const bool fallback_symlink = ResolveSymbolicLink(fallback, fallback_resolved);
++    normalized_path = fallback_symlink ? fallback_resolved : fallback;
++    had_symlink = had_symlink || fallback_symlink;
++    it = find_device(normalized_path);
++  }
+   if (it == devices_.cend()) {
+     REXFS_WARN("VFS: '{}' -> [no device]", path);
+     // Supress logging the error for ShaderDumpxe:\CompareBackEnds as this is
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 813bb1c..f963469 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -346,6 +346,12 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
+     if (mnk_driver->Setup() == X_STATUS_SUCCESS) {
+       input->AddDriver(std::move(mnk_driver));
+     }
++
++    // MnK driver for the second local player (distinct key set, guest user 1).
++    auto mnk2_driver = std::make_unique<mnk::MnkInputDriver>(nullptr, 0, 1);
++    if (mnk2_driver->Setup() == X_STATUS_SUCCESS) {
++      input->AddDriver(std::move(mnk2_driver));
++    }
+   }
+ 
+   // NOP driver (primary in tool mode, fallback otherwise)
+diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
+index 3f9422d..c4fcb94 100644
+--- a/src/input/mnk/mnk_input_driver.cpp
++++ b/src/input/mnk/mnk_input_driver.cpp
+@@ -58,12 +58,42 @@ REXCVAR_DEFINE_STRING(keybind_back, "Z,Tab", "Input/Keybinds/Controller", "Back
+ REXCVAR_DEFINE_STRING(keybind_start, "X,Return", "Input/Keybinds/Controller", "Start button");
+ REXCVAR_DEFINE_STRING(keybind_guide, "", "Input/Keybinds/Controller", "Guide button");
+ 
++REXCVAR_DEFINE_STRING(mnk2_keybind_a, "N", "Input/Keybinds/Controller2", "A button");
++REXCVAR_DEFINE_STRING(mnk2_keybind_b, "M", "Input/Keybinds/Controller2", "B button");
++REXCVAR_DEFINE_STRING(mnk2_keybind_x, "B", "Input/Keybinds/Controller2", "X button");
++REXCVAR_DEFINE_STRING(mnk2_keybind_y, "V", "Input/Keybinds/Controller2", "Y button");
++REXCVAR_DEFINE_STRING(mnk2_keybind_start, "Y", "Input/Keybinds/Controller2", "Start button");
++REXCVAR_DEFINE_STRING(mnk2_keybind_back, "J", "Input/Keybinds/Controller2", "Back button");
++REXCVAR_DEFINE_STRING(mnk2_keybind_lstick_up, "T", "Input/Keybinds/Controller2", "Left stick up");
++REXCVAR_DEFINE_STRING(mnk2_keybind_lstick_down, "G", "Input/Keybinds/Controller2",
++                      "Left stick down");
++REXCVAR_DEFINE_STRING(mnk2_keybind_lstick_left, "F", "Input/Keybinds/Controller2",
++                      "Left stick left");
++REXCVAR_DEFINE_STRING(mnk2_keybind_lstick_right, "H", "Input/Keybinds/Controller2",
++                      "Left stick right");
++REXCVAR_DEFINE_STRING(mnk2_keybind_left_trigger, "U", "Input/Keybinds/Controller2", "Left trigger");
++REXCVAR_DEFINE_STRING(mnk2_keybind_right_trigger, "R", "Input/Keybinds/Controller2", "Right trigger");
++REXCVAR_DEFINE_STRING(mnk2_keybind_left_shoulder, "7", "Input/Keybinds/Controller2", "Left shoulder");
++REXCVAR_DEFINE_STRING(mnk2_keybind_right_shoulder, "9", "Input/Keybinds/Controller2", "Right shoulder");
++REXCVAR_DEFINE_STRING(mnk2_keybind_lstick_press, "C", "Input/Keybinds/Controller2", "Left stick press");
++REXCVAR_DEFINE_STRING(mnk2_keybind_rstick_up, "", "Input/Keybinds/Controller2", "Right stick up");
++REXCVAR_DEFINE_STRING(mnk2_keybind_rstick_down, "", "Input/Keybinds/Controller2", "Right stick down");
++REXCVAR_DEFINE_STRING(mnk2_keybind_rstick_left, "", "Input/Keybinds/Controller2", "Right stick left");
++REXCVAR_DEFINE_STRING(mnk2_keybind_rstick_right, "", "Input/Keybinds/Controller2", "Right stick right");
++REXCVAR_DEFINE_STRING(mnk2_keybind_rstick_press, "", "Input/Keybinds/Controller2", "Right stick press");
++REXCVAR_DEFINE_STRING(mnk2_keybind_dpad_up, "", "Input/Keybinds/Controller2", "D-pad up");
++REXCVAR_DEFINE_STRING(mnk2_keybind_dpad_down, "", "Input/Keybinds/Controller2", "D-pad down");
++REXCVAR_DEFINE_STRING(mnk2_keybind_dpad_left, "", "Input/Keybinds/Controller2", "D-pad left");
++REXCVAR_DEFINE_STRING(mnk2_keybind_dpad_right, "", "Input/Keybinds/Controller2", "D-pad right");
++REXCVAR_DEFINE_STRING(mnk2_keybind_guide, "", "Input/Keybinds/Controller2", "Guide button");
++
++
+ namespace rex::input::mnk {
+ 
+ namespace {
+ 
+ // A single device, so its handle is a constant.
+-constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x4D4E4B00);
++constexpr uint32_t kMnkDeviceBase = 0x4D4E4B00;
+ 
+ // Bind values are a comma-separated list of alternatives, each optionally
+ // carrying modifier prefixes: "Q,I" or "Shift+W". Modifier matching is exact,
+@@ -149,8 +179,72 @@ bool IsMouseLookActive() {
+ 
+ using rex::ui::VirtualKey;
+ 
+-MnkInputDriver::MnkInputDriver(rex::ui::Window* window, size_t window_z_order)
+-    : InputDriver(window, window_z_order) {}
++MnkInputDriver::MnkInputDriver(rex::ui::Window* window, size_t window_z_order, int player_index)
++    : InputDriver(window, window_z_order),
++      player_index_(player_index),
++      device_id(static_cast<rex::input::DeviceId>(kMnkDeviceBase + player_index)) {}
++
++const std::string& MnkInputDriver::BindValue(int index) const {
++  static const std::string empty;
++  if (player_index_ == 0) {
++    switch (index) {
++      case kA: return REXCVAR_GET(keybind_a);
++      case kB: return REXCVAR_GET(keybind_b);
++      case kX: return REXCVAR_GET(keybind_x);
++      case kY: return REXCVAR_GET(keybind_y);
++      case kLB: return REXCVAR_GET(keybind_left_shoulder);
++      case kRB: return REXCVAR_GET(keybind_right_shoulder);
++      case kLT: return REXCVAR_GET(keybind_left_trigger);
++      case kRT: return REXCVAR_GET(keybind_right_trigger);
++      case kLS: return REXCVAR_GET(keybind_lstick_press);
++      case kRS: return REXCVAR_GET(keybind_rstick_press);
++      case kBack: return REXCVAR_GET(keybind_back);
++      case kStart: return REXCVAR_GET(keybind_start);
++      case kGuide: return REXCVAR_GET(keybind_guide);
++      case kDpadUp: return REXCVAR_GET(keybind_dpad_up);
++      case kDpadDown: return REXCVAR_GET(keybind_dpad_down);
++      case kDpadLeft: return REXCVAR_GET(keybind_dpad_left);
++      case kDpadRight: return REXCVAR_GET(keybind_dpad_right);
++      case kLStickUp: return REXCVAR_GET(keybind_lstick_up);
++      case kLStickDown: return REXCVAR_GET(keybind_lstick_down);
++      case kLStickLeft: return REXCVAR_GET(keybind_lstick_left);
++      case kLStickRight: return REXCVAR_GET(keybind_lstick_right);
++      case kRStickUp: return REXCVAR_GET(keybind_rstick_up);
++      case kRStickDown: return REXCVAR_GET(keybind_rstick_down);
++      case kRStickLeft: return REXCVAR_GET(keybind_rstick_left);
++      case kRStickRight: return REXCVAR_GET(keybind_rstick_right);
++      default: return empty;
++    }
++  }
++  switch (index) {
++    case kA: return REXCVAR_GET(mnk2_keybind_a);
++    case kB: return REXCVAR_GET(mnk2_keybind_b);
++    case kX: return REXCVAR_GET(mnk2_keybind_x);
++    case kY: return REXCVAR_GET(mnk2_keybind_y);
++    case kLB: return REXCVAR_GET(mnk2_keybind_left_shoulder);
++    case kRB: return REXCVAR_GET(mnk2_keybind_right_shoulder);
++    case kLT: return REXCVAR_GET(mnk2_keybind_left_trigger);
++    case kRT: return REXCVAR_GET(mnk2_keybind_right_trigger);
++    case kLS: return REXCVAR_GET(mnk2_keybind_lstick_press);
++    case kRS: return REXCVAR_GET(mnk2_keybind_rstick_press);
++    case kBack: return REXCVAR_GET(mnk2_keybind_back);
++    case kStart: return REXCVAR_GET(mnk2_keybind_start);
++    case kGuide: return REXCVAR_GET(mnk2_keybind_guide);
++    case kDpadUp: return REXCVAR_GET(mnk2_keybind_dpad_up);
++    case kDpadDown: return REXCVAR_GET(mnk2_keybind_dpad_down);
++    case kDpadLeft: return REXCVAR_GET(mnk2_keybind_dpad_left);
++    case kDpadRight: return REXCVAR_GET(mnk2_keybind_dpad_right);
++    case kLStickUp: return REXCVAR_GET(mnk2_keybind_lstick_up);
++    case kLStickDown: return REXCVAR_GET(mnk2_keybind_lstick_down);
++    case kLStickLeft: return REXCVAR_GET(mnk2_keybind_lstick_left);
++    case kLStickRight: return REXCVAR_GET(mnk2_keybind_lstick_right);
++    case kRStickUp: return REXCVAR_GET(mnk2_keybind_rstick_up);
++    case kRStickDown: return REXCVAR_GET(mnk2_keybind_rstick_down);
++    case kRStickLeft: return REXCVAR_GET(mnk2_keybind_rstick_left);
++    case kRStickRight: return REXCVAR_GET(mnk2_keybind_rstick_right);
++    default: return empty;
++  }
++}
+ 
+ MnkInputDriver::~MnkInputDriver() {
+   // Detach handled by OnClosing; if window outlives the driver, clean up here.
+@@ -225,15 +319,17 @@ void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+     return;
+   }
+   DeviceInfo info;
+-  info.id = kMnkDevice;
+-  info.name = "Keyboard and Mouse";
+-  info.synthetic = true;
++  info.id = device_id;
++  info.name = player_index_ == 0 ? "Keyboard and Mouse" : "Keyboard 2";
++  // Not synthetic: two keyboard players must receive distinct guest ordinals
++  // so one can drive guest user 0 and the other guest user 1.
++  info.synthetic = false;
+   out.push_back(info);
+ }
+ 
+ X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
+                                                X_INPUT_CAPABILITIES* out_caps) {
+-  if (!IsEnabled() || id != kMnkDevice) {
++  if (!IsEnabled() || id != device_id) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+   if (out_caps) {
+@@ -255,7 +351,7 @@ X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
+ }
+ 
+ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+-  if (!IsEnabled() || id != kMnkDevice) {
++  if (!IsEnabled() || id != device_id) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+ 
+@@ -275,60 +371,60 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+   std::lock_guard lock(state_mutex_);
+ 
+   uint16_t buttons = 0;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
++  if (IsBindPressed(key_down_, BindValue(kA)))
+     buttons |= X_INPUT_GAMEPAD_A;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_b)))
++  if (IsBindPressed(key_down_, BindValue(kB)))
+     buttons |= X_INPUT_GAMEPAD_B;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_x)))
++  if (IsBindPressed(key_down_, BindValue(kX)))
+     buttons |= X_INPUT_GAMEPAD_X;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_y)))
++  if (IsBindPressed(key_down_, BindValue(kY)))
+     buttons |= X_INPUT_GAMEPAD_Y;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_left_shoulder)))
++  if (IsBindPressed(key_down_, BindValue(kLB)))
+     buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_right_shoulder)))
++  if (IsBindPressed(key_down_, BindValue(kRB)))
+     buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_press)))
++  if (IsBindPressed(key_down_, BindValue(kLS)))
+     buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_press)))
++  if (IsBindPressed(key_down_, BindValue(kRS)))
+     buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_back)))
++  if (IsBindPressed(key_down_, BindValue(kBack)))
+     buttons |= X_INPUT_GAMEPAD_BACK;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_start)))
++  if (IsBindPressed(key_down_, BindValue(kStart)))
+     buttons |= X_INPUT_GAMEPAD_START;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_guide)))
++  if (IsBindPressed(key_down_, BindValue(kGuide)))
+     buttons |= X_INPUT_GAMEPAD_GUIDE;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_up)))
++  if (IsBindPressed(key_down_, BindValue(kDpadUp)))
+     buttons |= X_INPUT_GAMEPAD_DPAD_UP;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_down)))
++  if (IsBindPressed(key_down_, BindValue(kDpadDown)))
+     buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_left)))
++  if (IsBindPressed(key_down_, BindValue(kDpadLeft)))
+     buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_right)))
++  if (IsBindPressed(key_down_, BindValue(kDpadRight)))
+     buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
+ 
+-  uint8_t lt = IsBindPressed(key_down_, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
+-  uint8_t rt = IsBindPressed(key_down_, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
++  uint8_t lt = IsBindPressed(key_down_, BindValue(kLT)) ? 0xFF : 0;
++  uint8_t rt = IsBindPressed(key_down_, BindValue(kRT)) ? 0xFF : 0;
+ 
+   int32_t lx = 0;
+   int32_t ly = 0;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_left)))
++  if (IsBindPressed(key_down_, BindValue(kLStickLeft)))
+     lx -= INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_right)))
++  if (IsBindPressed(key_down_, BindValue(kLStickRight)))
+     lx += INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_up)))
++  if (IsBindPressed(key_down_, BindValue(kLStickUp)))
+     ly += INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_down)))
++  if (IsBindPressed(key_down_, BindValue(kLStickDown)))
+     ly -= INT16_MAX;
+ 
+   int32_t rx = 0;
+   int32_t ry = 0;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_left)))
++  if (IsBindPressed(key_down_, BindValue(kRStickLeft)))
+     rx -= INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_right)))
++  if (IsBindPressed(key_down_, BindValue(kRStickRight)))
+     rx += INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_up)))
++  if (IsBindPressed(key_down_, BindValue(kRStickUp)))
+     ry += INT16_MAX;
+-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
++  if (IsBindPressed(key_down_, BindValue(kRStickDown)))
+     ry -= INT16_MAX;
+ 
+   if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
+@@ -363,7 +459,7 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+ }
+ 
+ X_RESULT MnkInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) {
+-  if (!IsEnabled() || id != kMnkDevice) {
++  if (!IsEnabled() || id != device_id) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+   return X_ERROR_SUCCESS;
+@@ -371,7 +467,7 @@ X_RESULT MnkInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibr
+ 
+ X_RESULT MnkInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+                                             X_INPUT_KEYSTROKE* out_keystroke) {
+-  if (!IsEnabled() || id != kMnkDevice) {
++  if (!IsEnabled() || id != device_id) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+   std::lock_guard lock(state_mutex_);
+@@ -393,7 +489,41 @@ void MnkInputDriver::EnqueueKeystroke(uint16_t vk_pad, bool down) {
+   // InputSystem stamps the guest user this device is assigned to.
+   ks.user_index = 0;
+   ks.hid_code = 0;
+-  keystroke_queue_.push(ks);
++  if (keystroke_queue_.size() < 64) {
++    keystroke_queue_.push(ks);
++  }
++}
++
++void MnkInputDriver::UpdatePadKeystrokesLocked() {
++  using rex::ui::VirtualKey;
++  static const int kIndices[16] = {kA, kB, kX, kY, kLB, kRB, kLT, kRT,
++                                   kLS, kRS, kBack, kStart, kDpadUp, kDpadDown, kDpadLeft,
++                                   kDpadRight};
++  static const uint16_t kVks[16] = {
++      static_cast<uint16_t>(VirtualKey::kXInputPadA),
++      static_cast<uint16_t>(VirtualKey::kXInputPadB),
++      static_cast<uint16_t>(VirtualKey::kXInputPadX),
++      static_cast<uint16_t>(VirtualKey::kXInputPadY),
++      static_cast<uint16_t>(VirtualKey::kXInputPadLShoulder),
++      static_cast<uint16_t>(VirtualKey::kXInputPadRShoulder),
++      static_cast<uint16_t>(VirtualKey::kXInputPadLTrigger),
++      static_cast<uint16_t>(VirtualKey::kXInputPadRTrigger),
++      static_cast<uint16_t>(VirtualKey::kXInputPadLThumbPress),
++      static_cast<uint16_t>(VirtualKey::kXInputPadRThumbPress),
++      static_cast<uint16_t>(VirtualKey::kXInputPadBack),
++      static_cast<uint16_t>(VirtualKey::kXInputPadStart),
++      static_cast<uint16_t>(VirtualKey::kXInputPadDpadUp),
++      static_cast<uint16_t>(VirtualKey::kXInputPadDpadDown),
++      static_cast<uint16_t>(VirtualKey::kXInputPadDpadLeft),
++      static_cast<uint16_t>(VirtualKey::kXInputPadDpadRight),
++  };
++  for (size_t i = 0; i < 16; ++i) {
++    bool pressed = IsBindPressed(key_down_, BindValue(kIndices[i]));
++    if (pressed != pad_pressed_[i]) {
++      pad_pressed_[i] = pressed;
++      EnqueueKeystroke(kVks[i], pressed);
++    }
++  }
+ }
+ 
+ void MnkInputDriver::QueueMouseCaptureUpdate(bool should_capture) {
+@@ -486,6 +616,7 @@ void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
+   std::lock_guard lock(state_mutex_);
+   uint16_t vk = static_cast<uint16_t>(e.virtual_key());
+   SetKeyState(vk, true);
++  UpdatePadKeystrokesLocked();
+ }
+ 
+ void MnkInputDriver::OnKeyUp(rex::ui::KeyEvent& e) {
+@@ -494,6 +625,7 @@ void MnkInputDriver::OnKeyUp(rex::ui::KeyEvent& e) {
+   std::lock_guard lock(state_mutex_);
+   uint16_t vk = static_cast<uint16_t>(e.virtual_key());
+   SetKeyState(vk, false);
++  UpdatePadKeystrokesLocked();
+ }
+ 
+ void MnkInputDriver::OnMouseDown(rex::ui::MouseEvent& e) {
+diff --git a/src/kernel/xam/xam_input.cpp b/src/kernel/xam/xam_input.cpp
+index 80c3634..ae63478 100644
+--- a/src/kernel/xam/xam_input.cpp
++++ b/src/kernel/xam/xam_input.cpp
+@@ -112,7 +112,27 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
+   }
+ 
+   auto* is = input_system();
+-  return is->GetState(actual_user_index, input_state);
++  static int all_logs = 0;
++  if (all_logs < 32) {
++    all_logs++;
++    REXKRNL_DEBUG("[XAM] GetState call user={} flags=0x{:X} state={}", actual_user_index,
++                  (uint32_t)flags, input_state.guest_address());
++  }
++  u32 result = is->GetState(actual_user_index, input_state);
++  if (input_state && result == X_ERROR_SUCCESS) {
++    static int active_logs = 0;
++    const auto& gp = input_state->gamepad;
++    if (active_logs < 2000 &&
++        (gp.buttons != 0 || gp.left_trigger != 0 || gp.right_trigger != 0 ||
++         gp.thumb_lx != 0 || gp.thumb_ly != 0 || gp.thumb_rx != 0 || gp.thumb_ry != 0)) {
++      active_logs++;
++      REXKRNL_DEBUG("[XAM] GetState user={} buttons={:04X} lt={} rt={} lx={} ly={} rx={} ry={}",
++                    actual_user_index, (uint16_t)gp.buttons, (uint32_t)gp.left_trigger,
++                    (uint32_t)gp.right_trigger, (int16_t)gp.thumb_lx, (int16_t)gp.thumb_ly,
++                    (int16_t)gp.thumb_rx, (int16_t)gp.thumb_ry);
++    }
++  }
++  return result;
+ }
+ 
+ // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputsetstate(v=vs.85).aspx
+diff --git a/src/kernel/xam/xam_ui.cpp b/src/kernel/xam/xam_ui.cpp
+index 5a572ce..bc33057 100644
+--- a/src/kernel/xam/xam_ui.cpp
++++ b/src/kernel/xam/xam_ui.cpp
+@@ -17,6 +17,12 @@
+ 
+ #include <imgui.h>
+ 
++#include <chrono>
++#include <cctype>
++#include <cstring>
++#include <string>
++#include <vector>
++
+ REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
+                     "Don't display any UI, using defaults for prompts as needed");
+ #include <rex/kernel/xam/private.h>
+@@ -366,6 +372,7 @@ class KeyboardInputDialog : public XamDialog {
+   bool cancelled() const { return cancelled_; }
+ 
+   void OnDraw(ImGuiIO& io) override {
++    (void)io;
+     bool first_draw = false;
+     if (!has_opened_) {
+       ImGui::OpenPopup(title_.c_str());
+@@ -373,6 +380,7 @@ class KeyboardInputDialog : public XamDialog {
+       first_draw = true;
+     }
+     if (ImGui::BeginPopupModal(title_.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
++      PollController();
+       if (description_.size()) {
+         ImGui::TextWrapped("%s", description_.c_str());
+       }
+@@ -381,25 +389,21 @@ class KeyboardInputDialog : public XamDialog {
+       }
+       if (ImGui::InputText("##body", text_buffer_.data(), text_buffer_.size(),
+                            ImGuiInputTextFlags_EnterReturnsTrue)) {
+-        text_ = std::string(text_buffer_.data(), text_buffer_.size());
+-        cancelled_ = false;
+-        ImGui::CloseCurrentPopup();
+-        Close();
++        Finish(false);
+       }
+-      if (ImGui::Button("OK")) {
+-        text_ = std::string(text_buffer_.data(), text_buffer_.size());
+-        cancelled_ = false;
+-        ImGui::CloseCurrentPopup();
+-        Close();
++
++      ImGui::Separator();
++      DrawVirtualKeyboard();
++      ImGui::Text("Controller: D-pad/stick move, A select, B backspace, "
++                  "Start done, Back cancel, LB/RB shift.");
++      ImGui::Spacing();
++      if (ImGui::Button("OK", ImVec2(100, 0))) {
++        Finish(false);
+       }
+       ImGui::SameLine();
+-      if (ImGui::Button("Cancel")) {
+-        text_ = "";
+-        cancelled_ = true;
+-        ImGui::CloseCurrentPopup();
+-        Close();
++      if (ImGui::Button("Cancel", ImVec2(100, 0))) {
++        Finish(true);
+       }
+-      ImGui::Spacing();
+       ImGui::EndPopup();
+     } else {
+       Close();
+@@ -407,6 +411,319 @@ class KeyboardInputDialog : public XamDialog {
+   }
+ 
+  private:
++  enum class KeyKind { kChar, kShift, kSpace, kBack, kDone, kCancel };
++
++  struct Key {
++    const char* label;
++    char lower;
++    char upper;
++    KeyKind kind;
++  };
++
++  struct Row {
++    const Key* keys;
++    int count;
++  };
++
++  static const Row* GetRows(size_t& row_count) {
++    static const Key row0[] = {
++        {"1", '1', '1', KeyKind::kChar}, {"2", '2', '2', KeyKind::kChar},
++        {"3", '3', '3', KeyKind::kChar}, {"4", '4', '4', KeyKind::kChar},
++        {"5", '5', '5', KeyKind::kChar}, {"6", '6', '6', KeyKind::kChar},
++        {"7", '7', '7', KeyKind::kChar}, {"8", '8', '8', KeyKind::kChar},
++        {"9", '9', '9', KeyKind::kChar}, {"0", '0', '0', KeyKind::kChar},
++    };
++    static const Key row1[] = {
++        {"Q", 'q', 'Q', KeyKind::kChar}, {"W", 'w', 'W', KeyKind::kChar},
++        {"E", 'e', 'E', KeyKind::kChar}, {"R", 'r', 'R', KeyKind::kChar},
++        {"T", 't', 'T', KeyKind::kChar}, {"Y", 'y', 'Y', KeyKind::kChar},
++        {"U", 'u', 'U', KeyKind::kChar}, {"I", 'i', 'I', KeyKind::kChar},
++        {"O", 'o', 'O', KeyKind::kChar}, {"P", 'p', 'P', KeyKind::kChar},
++    };
++    static const Key row2[] = {
++        {"A", 'a', 'A', KeyKind::kChar}, {"S", 's', 'S', KeyKind::kChar},
++        {"D", 'd', 'D', KeyKind::kChar}, {"F", 'f', 'F', KeyKind::kChar},
++        {"G", 'g', 'G', KeyKind::kChar}, {"H", 'h', 'H', KeyKind::kChar},
++        {"J", 'j', 'J', KeyKind::kChar}, {"K", 'k', 'K', KeyKind::kChar},
++        {"L", 'l', 'L', KeyKind::kChar}, {"-", '-', '-', KeyKind::kChar},
++    };
++    static const Key row3[] = {
++        {"Z", 'z', 'Z', KeyKind::kChar}, {"X", 'x', 'X', KeyKind::kChar},
++        {"C", 'c', 'C', KeyKind::kChar}, {"V", 'v', 'V', KeyKind::kChar},
++        {"B", 'b', 'B', KeyKind::kChar}, {"N", 'n', 'N', KeyKind::kChar},
++        {"M", 'm', 'M', KeyKind::kChar}, {".", '.', '.', KeyKind::kChar},
++        {"_", '_', '_', KeyKind::kChar}, {"'", '\'', '\'', KeyKind::kChar},
++    };
++    static const Key row4[] = {
++        {"Shift", 0, 0, KeyKind::kShift},
++        {"Space", ' ', ' ', KeyKind::kSpace},
++        {"Back", 0, 0, KeyKind::kBack},
++        {"Done", 0, 0, KeyKind::kDone},
++        {"Cancel", 0, 0, KeyKind::kCancel},
++    };
++    static const Row rows[] = {
++        {row0, static_cast<int>(sizeof(row0) / sizeof(row0[0]))},
++        {row1, static_cast<int>(sizeof(row1) / sizeof(row1[0]))},
++        {row2, static_cast<int>(sizeof(row2) / sizeof(row2[0]))},
++        {row3, static_cast<int>(sizeof(row3) / sizeof(row3[0]))},
++        {row4, static_cast<int>(sizeof(row4) / sizeof(row4[0]))},
++    };
++    row_count = sizeof(rows) / sizeof(rows[0]);
++    return rows;
++  }
++
++  void DrawVirtualKeyboard() {
++    size_t row_count = 0;
++    const Row* rows = GetRows(row_count);
++    ClampSelection(rows, row_count);
++
++    ImGui::Text("Virtual keyboard%s", shift_ ? " [SHIFT]" : "");
++
++    for (size_t row = 0; row < row_count; ++row) {
++      for (int column = 0; column < rows[row].count; ++column) {
++        const Key& key = rows[row].keys[column];
++        std::string label = key.label;
++        if (key.kind == KeyKind::kChar && std::isalpha(static_cast<unsigned char>(key.lower))) {
++          label = std::string(1, shift_ ? key.upper : key.lower);
++        }
++        const bool selected =
++            static_cast<int>(row) == selected_row_ && column == selected_col_;
++        if (selected) {
++          ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.24f, 0.45f, 0.72f, 1.0f));
++        }
++        ImGui::PushID(static_cast<int>(row) * 100 + column);
++        if (ImGui::Button(label.c_str(), ImVec2(key.kind == KeyKind::kChar ? 34.0f : 64.0f,
++                                                28.0f))) {
++          selected_row_ = static_cast<int>(row);
++          selected_col_ = column;
++          ActivateSelection();
++        }
++        ImGui::PopID();
++        if (selected) {
++          ImGui::PopStyleColor();
++        }
++        if (column + 1 < rows[row].count) {
++          ImGui::SameLine();
++        }
++      }
++    }
++    ImGui::Spacing();
++    ImGui::Text("Name: %s", text_buffer_.data());
++  }
++
++  void ClampSelection(const Row* rows, size_t row_count) {
++    if (selected_row_ < 0) {
++      selected_row_ = 0;
++    }
++    if (static_cast<size_t>(selected_row_) >= row_count) {
++      selected_row_ = static_cast<int>(row_count - 1);
++    }
++    if (selected_col_ < 0) {
++      selected_col_ = 0;
++    }
++    if (selected_col_ >= rows[selected_row_].count) {
++      selected_col_ = rows[selected_row_].count - 1;
++    }
++  }
++
++  void MoveSelection(int dx, int dy) {
++    size_t row_count = 0;
++    const Row* rows = GetRows(row_count);
++    int row = selected_row_ + dy;
++    if (row < 0) {
++      row = 0;
++    }
++    if (static_cast<size_t>(row) >= row_count) {
++      row = static_cast<int>(row_count - 1);
++    }
++    int column = selected_col_ + dx;
++    if (column < 0) {
++      column = 0;
++    }
++    if (column >= rows[row].count) {
++      column = rows[row].count - 1;
++    }
++    selected_row_ = row;
++    selected_col_ = column;
++  }
++
++  void ActivateSelection() {
++    size_t row_count = 0;
++    const Row* rows = GetRows(row_count);
++    ClampSelection(rows, row_count);
++    const Key& key = rows[selected_row_].keys[selected_col_];
++    switch (key.kind) {
++      case KeyKind::kChar:
++        InsertCharacter(shift_ ? key.upper : key.lower);
++        break;
++      case KeyKind::kShift:
++        shift_ = !shift_;
++        break;
++      case KeyKind::kSpace:
++        InsertCharacter(' ');
++        break;
++      case KeyKind::kBack:
++        Backspace();
++        break;
++      case KeyKind::kDone:
++        Finish(false);
++        break;
++      case KeyKind::kCancel:
++        Finish(true);
++        break;
++    }
++  }
++
++  void InsertCharacter(char character) {
++    const size_t length = std::strlen(text_buffer_.data());
++    if (length + 1 < text_buffer_.size()) {
++      text_buffer_[length] = character;
++      text_buffer_[length + 1] = '\0';
++    }
++  }
++
++  void Backspace() {
++    const size_t length = std::strlen(text_buffer_.data());
++    if (length > 0) {
++      text_buffer_[length - 1] = '\0';
++    }
++  }
++
++  void Finish(bool cancel) {
++    if (cancel) {
++      text_.clear();
++      cancelled_ = true;
++    } else {
++      text_ = std::string(text_buffer_.data());
++      cancelled_ = false;
++    }
++    ImGui::CloseCurrentPopup();
++    Close();
++  }
++
++  void PollController() {
++#ifdef _WIN32
++    // Avoid including XInput.h: ReXGlue's guest type headers deliberately
++    // shadow several Windows SLIST types. Load the XInput entry point
++    // dynamically and use the documented XINPUT_STATE layout instead.
++    struct GamepadState {
++      WORD buttons;
++      BYTE left_trigger;
++      BYTE right_trigger;
++      SHORT thumb_lx;
++      SHORT thumb_ly;
++      SHORT thumb_rx;
++      SHORT thumb_ry;
++    };
++    struct ControllerState {
++      DWORD packet_number;
++      GamepadState gamepad;
++    };
++    using XInputGetStateFn = DWORD(WINAPI*)(DWORD, ControllerState*);
++    static XInputGetStateFn get_state = []() -> XInputGetStateFn {
++      HMODULE library = LoadLibraryW(L"xinput1_4.dll");
++      if (!library) {
++        library = LoadLibraryW(L"xinput9_1_0.dll");
++      }
++      if (!library) {
++        return nullptr;
++      }
++      return reinterpret_cast<XInputGetStateFn>(
++          GetProcAddress(library, "XInputGetState"));
++    }();
++    if (!get_state) {
++      previous_buttons_ = 0;
++      last_dx_ = 0;
++      last_dy_ = 0;
++      return;
++    }
++
++    ControllerState state{};
++    if (get_state(0, &state) != 0) {
++      previous_buttons_ = 0;
++      last_dx_ = 0;
++      last_dy_ = 0;
++      return;
++    }
++
++    constexpr WORD kA = 0x1000;
++    constexpr WORD kB = 0x2000;
++    constexpr WORD kStart = 0x0010;
++    constexpr WORD kBack = 0x0020;
++    constexpr WORD kLeftShoulder = 0x0100;
++    constexpr WORD kRightShoulder = 0x0200;
++    constexpr WORD kDpadUp = 0x0001;
++    constexpr WORD kDpadDown = 0x0002;
++    constexpr WORD kDpadLeft = 0x0004;
++    constexpr WORD kDpadRight = 0x0008;
++    constexpr SHORT kDeadzone = 7849;
++
++    const WORD buttons = state.gamepad.buttons;
++    const auto pressed = [&](WORD mask) {
++      return (buttons & mask) != 0 && (previous_buttons_ & mask) == 0;
++    };
++
++    if (pressed(kA)) {
++      ActivateSelection();
++    }
++    if (pressed(kB)) {
++      Backspace();
++    }
++    if (pressed(kStart)) {
++      Finish(false);
++      previous_buttons_ = buttons;
++      return;
++    }
++    if (pressed(kBack)) {
++      Finish(true);
++      previous_buttons_ = buttons;
++      return;
++    }
++    if (pressed(kLeftShoulder) || pressed(kRightShoulder)) {
++      shift_ = !shift_;
++    }
++
++    int dx = 0;
++    int dy = 0;
++    if (buttons & kDpadLeft) {
++      dx = -1;
++    } else if (buttons & kDpadRight) {
++      dx = 1;
++    }
++    if (buttons & kDpadUp) {
++      dy = -1;
++    } else if (buttons & kDpadDown) {
++      dy = 1;
++    }
++    if (state.gamepad.thumb_lx < -kDeadzone) {
++      dx = -1;
++    } else if (state.gamepad.thumb_lx > kDeadzone) {
++      dx = 1;
++    }
++    if (state.gamepad.thumb_ly > kDeadzone) {
++      dy = -1;
++    } else if (state.gamepad.thumb_ly < -kDeadzone) {
++      dy = 1;
++    }
++
++    const auto now = std::chrono::steady_clock::now();
++    if (dx != 0 || dy != 0) {
++      if (dx != last_dx_ || dy != last_dy_ || now >= next_repeat_) {
++        MoveSelection(dx, dy);
++        const bool changed = dx != last_dx_ || dy != last_dy_;
++        next_repeat_ = now + std::chrono::milliseconds(changed ? 350 : 90);
++        last_dx_ = dx;
++        last_dy_ = dy;
++      }
++    } else {
++      last_dx_ = 0;
++      last_dy_ = 0;
++      next_repeat_ = now;
++    }
++    previous_buttons_ = buttons;
++#endif
++  }
++
+   bool has_opened_ = false;
+   std::string title_;
+   std::string description_;
+@@ -415,6 +732,15 @@ class KeyboardInputDialog : public XamDialog {
+   std::vector<char> text_buffer_;
+   std::string text_ = "";
+   bool cancelled_ = true;
++  int selected_row_ = 0;
++  int selected_col_ = 0;
++  bool shift_ = false;
++#ifdef _WIN32
++  WORD previous_buttons_ = 0;
++  int last_dx_ = 0;
++  int last_dy_ = 0;
++  std::chrono::steady_clock::time_point next_repeat_{};
++#endif
+ };
+ 
+ // https://www.se7ensins.com/forums/threads/release-how-to-use-xshowkeyboardui-release.906568/
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_video.cpp b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
+index 1254710..6e04093 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_video.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_video.cpp
+@@ -21,6 +21,8 @@
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/video_mode_util.h>
+ #include <rex/graphics/xenos.h>
++#include <chrono>
++
+ #include <rex/kernel/xboxkrnl/private.h>
+ #include <rex/kernel/xboxkrnl/rtl.h>
+ #include <rex/kernel/xboxkrnl/video.h>
+@@ -445,6 +447,18 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
+                   mapped_u32 frontbuffer_ptr,  // ptr to frontbuffer address
+                   mapped_u32 texture_format_ptr, mapped_u32 color_space_ptr, mapped_u32 width,
+                   mapped_u32 height) {
++  {
++    static int swap_count = 0;
++    static auto last = std::chrono::steady_clock::now();
++    if (++swap_count % 120 == 0) {
++      auto now = std::chrono::steady_clock::now();
++      double secs = std::chrono::duration<double>(now - last).count();
++      REXKRNL_DEBUG("[timing] 120 VdSwap frames in {:.3f}s -> {:.2f} fps (total {})", secs,
++                    120.0 / secs, swap_count);
++      last = now;
++    }
++  }
++
+   // All of these parameters are REQUIRED.
+   assert(buffer_ptr);
+   assert(fetch_ptr);
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index 306118e..f27e227 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -32,6 +32,14 @@
+ 
+ REXCVAR_DEFINE_BOOL(d3d12_allow_variable_refresh_rate_and_tearing, true, "UI/D3D12",
+                     "Allow variable refresh rate and tearing");
++REXCVAR_DEFINE_BOOL(waitable_swap_chain, true, "UI/D3D12",
++                    "Use a DXGI frame-latency waitable swap chain for lower input "
++                    "latency (requires Windows 10 1803 or newer)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(waitable_swap_chain_max_latency, 1, "UI/D3D12",
++                     "Maximum frames queued with the waitable swap chain")
++    .range(1, 4)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex::ui::d3d12 {
+ 
+@@ -55,7 +63,7 @@ D3D12Presenter::~D3D12Presenter() {
+   // Await completion of the usage of everything before destroying anything.
+   // From most likely the latest to most likely the earliest to be signaled, so
+   // just one sleep will likely be needed.
+-  paint_context_.AwaitSwapChainUsageCompletion();
++  paint_context_.DestroySwapChain();
+   guest_output_resource_refresher_submission_tracker_.Shutdown();
+   ui_submission_tracker_.Shutdown();
+ #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
+@@ -361,9 +369,14 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+          paint_context_.swap_chain_buffers) {
+       swap_chain_buffer_ref.Reset();
+     }
++    UINT resize_flags =
++        paint_context_.swap_chain_allows_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
++    if (paint_context_.swap_chain_waitable) {
++      resize_flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
++    }
+     bool swap_chain_resized = SUCCEEDED(paint_context_.swap_chain->ResizeBuffers(
+         0, UINT(new_swap_chain_width), UINT(new_swap_chain_height), DXGI_FORMAT_UNKNOWN,
+-        paint_context_.swap_chain_allows_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0));
++        resize_flags));
+     if (swap_chain_resized) {
+       for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
+         if (FAILED(paint_context_.swap_chain->GetBuffer(
+@@ -413,6 +426,10 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+       // rate.
+       swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+     }
++    bool use_waitable_swap_chain = REXCVAR_GET(waitable_swap_chain);
++    if (use_waitable_swap_chain) {
++      swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
++    }
+     IDXGIFactory2* dxgi_factory = provider_.GetDXGIFactory();
+     ID3D12CommandQueue* direct_queue = provider_.GetDirectQueue();
+     Microsoft::WRL::ComPtr<IDXGISwapChain1> swap_chain_1;
+@@ -420,8 +437,18 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+ #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_GAMES)
+       case Surface::kTypeIndex_Win32Hwnd: {
+         HWND surface_hwnd = static_cast<const Win32HwndSurface&>(new_surface).hwnd();
+-        if (FAILED(dxgi_factory->CreateSwapChainForHwnd(
+-                direct_queue, surface_hwnd, &swap_chain_desc, nullptr, nullptr, &swap_chain_1))) {
++        HRESULT create_result = dxgi_factory->CreateSwapChainForHwnd(
++            direct_queue, surface_hwnd, &swap_chain_desc, nullptr, nullptr, &swap_chain_1);
++        if (FAILED(create_result) && use_waitable_swap_chain) {
++          REXLOG_WARN(
++              "D3D12Presenter: A waitable swap chain could not be created, "
++              "falling back without frame latency control");
++          swap_chain_desc.Flags &= ~DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
++          use_waitable_swap_chain = false;
++          create_result = dxgi_factory->CreateSwapChainForHwnd(
++              direct_queue, surface_hwnd, &swap_chain_desc, nullptr, nullptr, &swap_chain_1);
++        }
++        if (FAILED(create_result)) {
+           REXLOG_ERROR("D3D12Presenter: Failed to create a swap chain for the HWND");
+           return SurfacePaintConnectResult::kFailure;
+         }
+@@ -450,6 +477,27 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+     paint_context_.swap_chain_height = new_swap_chain_height;
+     paint_context_.swap_chain_allows_tearing =
+         (swap_chain_desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
++    paint_context_.swap_chain_waitable = use_waitable_swap_chain;
++    if (use_waitable_swap_chain) {
++      Microsoft::WRL::ComPtr<IDXGISwapChain2> swap_chain_2;
++      if (SUCCEEDED(paint_context_.swap_chain.As(&swap_chain_2))) {
++        const int32_t max_latency = std::clamp<int32_t>(
++            REXCVAR_GET(waitable_swap_chain_max_latency), 1, 4);
++        swap_chain_2->SetMaximumFrameLatency(static_cast<UINT>(max_latency));
++        paint_context_.frame_latency_waitable =
++            swap_chain_2->GetFrameLatencyWaitableObject();
++        if (!paint_context_.frame_latency_waitable) {
++          paint_context_.swap_chain_waitable = false;
++        } else {
++          REXLOG_INFO(
++              "D3D12Presenter: Waitable swap chain enabled with a maximum frame "
++              "latency of {}",
++              max_latency);
++        }
++      } else {
++        paint_context_.swap_chain_waitable = false;
++      }
++    }
+     for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
+       if (FAILED(paint_context_.swap_chain->GetBuffer(
+               i, IID_PPV_ARGS(&paint_context_.swap_chain_buffers[i])))) {
+@@ -542,19 +590,36 @@ bool D3D12Presenter::RefreshGuestOutputImpl(
+ 
+ void D3D12Presenter::PaintContext::DestroySwapChain() {
+   if (!swap_chain) {
++    if (frame_latency_waitable) {
++      CloseHandle(frame_latency_waitable);
++      frame_latency_waitable = nullptr;
++    }
++    swap_chain_waitable = false;
+     return;
+   }
+   AwaitSwapChainUsageCompletion();
++  if (frame_latency_waitable) {
++    CloseHandle(frame_latency_waitable);
++    frame_latency_waitable = nullptr;
++  }
+   for (Microsoft::WRL::ComPtr<ID3D12Resource>& swap_chain_buffer_ref : swap_chain_buffers) {
+     swap_chain_buffer_ref.Reset();
+   }
+   swap_chain.Reset();
+   swap_chain_allows_tearing = false;
++  swap_chain_waitable = false;
+   swap_chain_height = 0;
+   swap_chain_width = 0;
+ }
+ 
+ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawers) {
++  // Wait for the presentation engine to release a frame before preparing the
++  // next one. With the waitable swap chain this limits the number of queued
++  // frames and reduces input latency without a blocking vsync present.
++  if (paint_context_.frame_latency_waitable) {
++    WaitForSingleObject(paint_context_.frame_latency_waitable, 1000);
++  }
++
+   // Begin the command list with the command allocator not currently potentially
+   // used on the GPU.
+   UINT64 current_paint_submission = paint_context_.paint_submission_tracker.GetCurrentSubmission();
+diff --git a/thirdparty/libmspack b/thirdparty/libmspack
+--- a/thirdparty/libmspack
++++ b/thirdparty/libmspack
+@@ -1 +1 @@
+-Subproject commit 305907723a4e7ab2018e58040059ffb5e77db837
++Subproject commit 305907723a4e7ab2018e58040059ffb5e77db837-dirty

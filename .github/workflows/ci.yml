@@ -1,0 +1,23 @@
+name: repository
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python tools
+        run: python -m compileall -q tools
+      - name: Test the ISO extractor
+        run: python -m unittest discover -s tools -p "test_*.py" -v
+      - name: Reject game data and build output
+        run: python tools/check_public_tree.py
