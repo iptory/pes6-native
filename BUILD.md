@@ -54,8 +54,10 @@ The helper finds `clang.exe`, `clang++.exe`, and the newest Windows SDK
 ## 3. Build and install the SDK
 
 ```bash
+cd rexglue-sdk
 cmake --preset win-amd64-local
 cmake --build --preset win-amd64-local-release --target install
+cd ..
 ```
 
 The install goes to `rexglue-sdk/out/install/win-amd64-local`. It contains

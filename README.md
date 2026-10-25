@@ -69,8 +69,10 @@ git apply ../patches/rexglue-sdk.patch
 python ../tools/fix_libmspack_symlinks.py .
 cd ..
 python tools/configure_windows.py
+cd rexglue-sdk
 cmake --preset win-amd64-local
 cmake --build --preset win-amd64-local-release --target install
+cd ..
 python tools/xdvdfs_extract.py PES6.iso game
 cd project
 ../rexglue-sdk/out/install/win-amd64-local/bin/rexglue.exe codegen pes6_manifest.toml --ignore-stamp
