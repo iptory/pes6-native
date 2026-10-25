@@ -992,13 +992,14 @@ index 5a572ce..a599bd1 100644
        [device_id_ptr]() -> X_RESULT {
          // NOTE: 0x00000001 is our dummy device ID from xam_content.cc
 diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
-index 8778066..58965cf 100644
+index 8778066..8ac1495 100644
 --- a/src/kernel/xam/xam_user.cpp
 +++ b/src/kernel/xam/xam_user.cpp
-@@ -45,18 +45,11 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
+@@ -44,19 +44,12 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
+   }
    uint32_t result = X_E_NO_SUCH_USER;
    uint64_t xuid = 0;
-   if (user_index < 4) {
+-  if (user_index < 4) {
 -    if (user_index == 0) {
 -      const auto& user_profile = REX_KERNEL_STATE()->user_profile();
 -      auto type = user_profile->type() & type_mask;
@@ -1011,6 +1012,7 @@ index 8778066..58965cf 100644
 -        xuid = user_profile->xuid();
 -        result = X_E_SUCCESS;
 -      }
++  if (user_index < 4 || user_index == 0xFF) {
 +    const auto& user_profile = REX_KERNEL_STATE()->user_profile();
 +    auto type = user_profile->type() & type_mask;
 +    if (type & (1 | 2 | 4)) {
@@ -1041,11 +1043,16 @@ index 8778066..58965cf 100644
  
    std::memset(info, 0, sizeof(X_USER_SIGNIN_INFO));
 -  if (user_index) {
-+  if (user_index >= 4) {
++  if (user_index >= 4 && user_index != 0xFF) {
      return X_E_NO_SUCH_USER;
    }
  
-@@ -108,10 +100,6 @@ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
+@@ -104,14 +96,10 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
+ }
+ 
+ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
+-  if (user_index >= 4) {
++  if (user_index >= 4 && user_index != 0xFF) {
      return X_E_INVALIDARG;
    }
  
@@ -1056,7 +1063,12 @@ index 8778066..58965cf 100644
    const auto& user_profile = REX_KERNEL_STATE()->user_profile();
    const auto& user_name = user_profile->name();
    rex::string::copy_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
-@@ -123,10 +111,6 @@ u32 XamUserGetGamerTag_entry(u32 user_index, mapped_wstring buffer, u32 buffer_l
+@@ -119,14 +107,10 @@ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
+ }
+ 
+ u32 XamUserGetGamerTag_entry(u32 user_index, mapped_wstring buffer, u32 buffer_len) {
+-  if (user_index >= 4) {
++  if (user_index >= 4 && user_index != 0xFF) {
      return X_E_INVALIDARG;
    }
  
