@@ -37,6 +37,24 @@ build logs.
 | Package smoke test | The built executable with its runtime DLLs booted the intro with an external game-data path |
 | Clean-tree build | A detached worktree containing only the tracked files configured, generated, built, and booted with `rexgpu-xenos.dll` staged by the build |
 
+## Builder verification, 2026-10-28
+
+- A fresh headless builder run staged an extracted game folder, cloned and
+  built the pinned SDK, generated native code, compiled and assembled the game.
+  It completed without launching the game. Code generation reported unresolved
+  function/stub warnings; gameplay was not re-tested in this pass.
+- The ISO extraction path produced the expected local `default.xex` SHA-256
+  `b76db0fc2f86794f4e99bb4d93dd8148d31a00b518cb1e5c822ef0bc75ac1087`
+  and reported progress. An invalid image surfaced an error and left no
+  installed game directory.
+- The Windows drag-and-drop handler received a real `WM_DROPFILES` message
+  with a Unicode ISO path and started the source-selection flow.
+- Automatic launch was exercised with a compiled harmless executable, not the
+  game; its data argument and working directory were verified.
+- 38 builder tests and 4 extractor tests passed. Missing-tool installation was
+  not exercised against a real package installation.
+- Android has not been built or run. No Android device was attached.
+
 ## Known limits
 
 - The game uses a fixed 60 Hz simulation tick. The project does not retime

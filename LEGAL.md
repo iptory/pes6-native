@@ -4,11 +4,11 @@ This is a project policy, not legal advice. Copyright, contract, and
 anti-circumvention rules differ by country. Consult a lawyer before publishing
 a build or distributing game-derived material.
 
-## The safe public release is source only
+## Public release policy
 
-This repository is a build tooling. Publish it as source. Do not attach a
-compiled game, a game ISO, extracted game files, generated translation units,
-or a binary release.
+Publish the project as source or as a setup and build tool that contains no
+game-derived code or assets. Do not attach a compiled game, a game ISO,
+extracted game files, or generated translation units.
 
 The generated C++ is produced from the retail game's PowerPC code. The
 compiled `pes6.exe` contains that translated code. Both are derivative works
@@ -53,9 +53,9 @@ successful local build is permission to publish.
 
 ## Binary releases
 
-A binary release would contain recompiled game code. Do not publish one
-without permission from the rights holders. A binary would also trigger
-third-party obligations:
+A compiled game contains recompiled game code. Do not publish it without
+permission from the rights holders. Distributing a game binary would also
+trigger third-party obligations:
 
 - ReXGlue and Xenia-derived code use the BSD 3-Clause license. Keep the
   copyright notice, conditions, and disclaimer.
@@ -71,6 +71,9 @@ third-party obligations:
 
 Do not upload a release ZIP that contains game data, generated code, or a
 compiled game unless you have the rights to do so.
+
+The standalone `PES6Builder.exe` contains project build tooling, not the
+compiled game. Its embedded notices describe its own bundled components.
 
 ## Patches and contributions
 

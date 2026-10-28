@@ -45,25 +45,28 @@ tested behavior and the remaining limits.
 
 A complete build is described in [BUILD.md](BUILD.md).
 
-## One-click setup on Windows
+## Windows builder
 
-Download `PES6Builder.exe` from the [v1.0.0 release](https://github.com/iptory/pes6-native/releases/tag/v1.0.0).
+Download `PES6Builder.exe` from the [latest release](https://github.com/iptory/pes6-native/releases/latest)
+and open it on Windows. Drop your own PAL ISO into the window or select it
+with **Browse ISO**. The build starts automatically; you can also select an
+extracted game folder or choose a different output folder before selecting the
+source.
 
-The builder contains no game code or game data. It asks for your own PAL ISO or
-extracted game folder, checks the required tools, downloads the pinned ReXGlue
-SDK and public project source, and builds the game locally.
+The builder needs Git, CMake, Ninja, LLVM/Clang and Visual Studio Build Tools
+with the Windows SDK. It offers to install missing tools using Windows Package
+Manager, with your approval. Downloads can be large and may require
+administrator permission. If tools are not detected afterward, restart the
+builder and select your ISO again.
 
-Required on the build machine:
+The window reports progress, elapsed time and errors. By default the build is
+stored under `Documents\PES6NativeBuilder`; on success the builder displays
+the full game and launcher paths and starts the game. Use `PES6\Play PES6.cmd`
+to start it again. Game data and generated code are not uploaded. The
+**Licenses** button opens the bundled notices.
 
-- Git
-- CMake
-- Ninja
-- LLVM/Clang
-- Visual Studio 2022 Build Tools with the Windows SDK
-
-The builder shows the exact `winget` commands for missing tools. After the build,
-it assembles a local `PES6` folder and launches `Play PES6.cmd`. No game data or
-generated code is uploaded.
+Android is not currently supported. The pinned SDK lacks Android application,
+window and storage integration, and no Android build or device run is verified.
 
 ## Repository layout
 

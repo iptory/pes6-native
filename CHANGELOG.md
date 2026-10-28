@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.1 - 2026-10-28
+
+- Fix source preparation and surface build stages, progress, cancellation, and errors.
+- Bundle project source with the builder and offer installation of missing
+  Windows build tools through Windows Package Manager.
+- Accept ISO drag-and-drop or browsing, start the build automatically, show the
+  resulting paths and launch the locally built game.
+- Add a reproducible builder packaging command with embedded license notices.
+- Android remains unsupported; no Android build has been verified.
+
 ## 1.0.0 - 2026-10-25
 
 First full source release of the native Windows x64 PES6 project.

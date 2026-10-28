@@ -16,6 +16,26 @@ the extracted game, or a compiled executable.
 Clang, CMake, and Ninja must be available from the shell. The upstream SDK
 preset selects `clang` and `clang++`.
 
+## Package the Windows builder
+
+From a Windows Git checkout with Python and PyInstaller installed:
+
+```text
+py -3 builder/package_builder.py --out C:\path\to\new-builder-output
+```
+
+The output directory must not already exist. It receives `PES6Builder.exe` and
+license notices, which are also embedded in the executable. The executable
+embeds the tracked project source and the ISO extractor; it contains no game
+files or generated game code. Packaging reads the current working-tree contents
+of tracked files, so review changes before publishing. The builder still
+downloads the pinned SDK and its submodules.
+
+The builder can install missing Windows tools through `winget` after the user
+approves the package list. The compiler and Windows SDK remain necessary for
+local compilation. Selecting an ISO starts the build; successful completion
+displays the output paths and starts the compiled game with its data path.
+
 ## 1. Clone and patch ReXGlue
 
 The commands below assume the SDK is cloned inside the repository root.

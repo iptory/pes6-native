@@ -12,6 +12,6 @@ The prebuilt executable embeds the following components:
 | Pillow | HPND | https://python-pillow.org/ |
 | PyInstaller | GPL-2.0-or-later with bootloader exception | https://pyinstaller.org/ |
 
-The builder downloads the public project source and the pinned ReXGlue SDK at
-runtime. Those components keep their own licenses. See the source repository's
+The packaged builder includes the public project source and downloads the pinned
+ReXGlue SDK at runtime. Those components keep their own licenses. See
 `THIRD_PARTY_NOTICES.md` for the ReXGlue and SDK dependency notices.

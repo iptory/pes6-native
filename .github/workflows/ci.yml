@@ -21,3 +21,15 @@ jobs:
         run: python -m unittest discover -s tools -p "test_*.py" -v
       - name: Reject game data and build output
         run: python tools/check_public_tree.py
+
+  builder:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compile builder
+        run: python -m compileall -q builder
+      - name: Test builder
+        run: python -m unittest discover -s builder -p "test_*.py" -v

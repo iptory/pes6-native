@@ -37,12 +37,18 @@ class Image:
         self.f.close()
 
 
-def find_partition(img):
-    """Return the byte offset of the game partition start."""
+def find_partition(img, on_progress=None):
+    """Return the byte offset of the game partition start.
+
+    When ``on_progress`` is provided it is called as
+    ``on_progress(bytes_scanned, total_bytes)`` after each scan chunk.
+    Exceptions from the callback abort the scan.
+    """
     # The volume descriptor lives at partition + 0x10000 and begins with MAGIC.
     chunk = 1 << 24
     prev = b""
     off = 0
+    total = getattr(img, "size", 0) or 0
     while off < img.size:
         b = img.read_at(off, chunk)
         if not b:
@@ -63,6 +69,8 @@ def find_partition(img):
             idx = i + 1
         prev = b[-len(MAGIC):]
         off += len(b)
+        if on_progress is not None:
+            on_progress(off if not total else min(off, total), total)
     raise RuntimeError("XDVDFS volume descriptor not found")
 
 
@@ -137,7 +145,13 @@ def walk_dir(img, part, sector, size):
         yield decoded, bool(attr & 0x10), start, fsize, attr
 
 
-def extract(img, part, outdir, list_only=False, filter_prefix="", manifest_path=None):
+def extract(img, part, outdir, list_only=False, filter_prefix="", manifest_path=None, on_progress=None):
+    """Write the partition file tree to ``outdir`` and return the entries.
+
+    When ``on_progress`` is provided it is called as
+    ``on_progress(files_done, total_files, path)`` while copying each file.
+    Exceptions from the callback abort the extraction.
+    """
     desc = read_descriptor(img, part)
     entries = []
     stack = [("", desc["root_dir_sector"], desc["root_dir_size"])]
@@ -160,7 +174,12 @@ def extract(img, part, outdir, list_only=False, filter_prefix="", manifest_path=
         return entries
 
     os.makedirs(outdir, exist_ok=True)
+    total_files = sum(
+        1 for path, is_dir, _start, _size, _attr in entries
+        if not is_dir and (not filter_prefix or path.startswith(filter_prefix))
+    )
     manifest = []
+    done_files = 0
     for path, is_dir, start, fsize, attr in entries:
         if filter_prefix and not path.startswith(filter_prefix):
             continue
@@ -184,8 +203,13 @@ def extract(img, part, outdir, list_only=False, filter_prefix="", manifest_path=
                 h.update(chunk)
                 offset += n
                 remaining -= n
+                if on_progress is not None:
+                    on_progress(done_files, total_files, path)
         manifest.append({"path": path, "size": fsize, "sector": start,
                          "attr": attr, "sha256": h.hexdigest()})
+        done_files += 1
+        if on_progress is not None:
+            on_progress(done_files, total_files, path)
     if manifest_path:
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=1, sort_keys=True)
