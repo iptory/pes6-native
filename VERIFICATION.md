@@ -68,6 +68,34 @@ build logs.
 - This hotfix does not change game runtime code. Cleanup/dependency redesign
   and replay-audio/frame-pacing investigation are deferred.
 
+## Builder 1.0.3 verification, 2026-10-29
+
+- A fresh run imported the local PAL ISO, cloned and built the pinned SDK,
+  generated code and compiled the game into a path containing spaces and `é`.
+  It assembled the final directory and removed its private workspace before
+  the handoff. A harmless windowless executable verified the launch arguments
+  and working directory; folder opening was intercepted. The game itself was
+  not launched.
+- With an empty portable-tool inventory and a minimal PATH, the builder
+  downloaded and verified its actual Git, CMake, Ninja and LLVM archives,
+  compiled and ran a C++/Windows-resource probe with the existing Microsoft
+  toolchain, and removed the disposable workspace. The original input stand-in
+  remained intact.
+- Both current Microsoft bootstrapper downloads passed the real Windows
+  Authenticode validation without executing either installer. Installer
+  success, errors, UAC denial and post-install detection were exercised with
+  stand-ins. A clean Windows VM was unavailable; a real first-time elevated
+  MSVC/SDK installation was not exercised.
+- 85 builder and 4 extractor tests passed, including cancellation, process
+  tree ownership, long paths, Unicode configuration, cleanup failure and
+  preservation of user files. The runtime logging probe loaded a config from a
+  Unicode directory: disabled logging produced no file, while explicitly
+  enabling it produced the expected file.
+- The real packaged builder opened on an isolated desktop. Source UI captures
+  at normal and enlarged text scales, including the packaged cleanup option,
+  passed two independent visual reviews. No game window or audio was opened.
+- Replay scratching and intermittent 30 fps remain unresolved and are deferred.
+
 ## Known limits
 
 - The game uses a fixed 60 Hz simulation tick. The project does not retime

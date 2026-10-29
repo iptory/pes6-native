@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.3 - 2026-10-29
+
+- Automatically download verified portable Git, CMake, Ninja and LLVM when
+  needed; install missing Microsoft C++/SDK/runtime components after Windows
+  administrator approval, then detect them without a restart.
+- Show estimated overall progress, real operation counters, elapsed time and
+  recent activity in the compact PES6-themed installer.
+- Keep each build in an owned disposable workspace; clean it after success,
+  failure or cancellation without replacing an existing game or removing user
+  input and shared system tools. The downloaded installer can remove itself
+  after successful completion.
+- Open the finished game folder and start the locally built executable after
+  cleanup. Disable persistent game log files by default, retaining required
+  runtime configuration and license notices.
+- Fix SDK checkout on long Windows paths and codegen/config parsing in Unicode
+  installation paths.
+
+
 ## 1.0.2 - 2026-10-28
 
 - Fix the undefined Visual Studio installer options that stopped missing-tool

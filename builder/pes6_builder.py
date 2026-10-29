@@ -13,8 +13,9 @@ reported as complete but the launch failure is reported separately with the
 manual command to run.
 """
 
+import base64
+import hashlib
 import filecmp
-import glob
 import json
 import os
 import queue
@@ -29,7 +30,13 @@ import traceback
 import urllib.error
 import urllib.request
 import zipfile
+from collections import deque
 from pathlib import Path
+
+import dependencies
+from installation import BuildSession, WorkspaceCleanupError, copy_notices, write_launcher, write_runtime_config
+from processes import ProcessTree
+from progress import BuildProgress, NINJA_PROGRESS
 
 try:
     import tkinter as tk
@@ -48,7 +55,7 @@ except Exception:
     PILImage = None
 
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 SOURCE_URL = f"https://github.com/iptory/pes6-native/archive/refs/tags/v{VERSION}.zip"
 SDK_URL = "https://github.com/rexglue/rexglue-sdk.git"
 SDK_COMMIT = "c94f5ebdcb3c9d1a460ca48e04f9758448f8d518"
@@ -66,47 +73,6 @@ SYSTEM_DLLS = (
     "vcruntime140.dll",
     "vcruntime140_1.dll",
 )
-REQUIRED_WINGET_PACKAGES = (
-    (frozenset({"git"}), "Git.Git"),
-    (frozenset({"cmake"}), "Kitware.CMake"),
-    (frozenset({"ninja"}), "Ninja-build.Ninja"),
-    (frozenset({"clang", "clangxx"}), "LLVM.LLVM"),
-    (frozenset({"msvc", "rc"}), "Microsoft.VisualStudio.2022.BuildTools"),
-)
-WINGET_VS_OVERRIDE = (
-    "--quiet --wait --norestart "
-    "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-)
-
-
-def missing_winget_packages(found):
-    """Map missing prerequisite names to the winget packages that fix them."""
-    missing = {name for name, path in (found or {}).items() if not path}
-    return [package for names, package in REQUIRED_WINGET_PACKAGES if missing & set(names)]
-
-
-def winget_consent_text(packages, found=None):
-    """User-facing consent text for tool installation (no silent acceptance)."""
-    lines = [
-        "Build tools are missing, so the selected ISO cannot build yet.",
-        "",
-        "Install with Windows Package Manager (winget)?",
-        "",
-    ]
-    lines.extend(f"  - {package}" for package in packages)
-    lines.extend([
-        "",
-        "Downloads may be large and may require administrator permission.",
-        "Package and source agreements will be accepted for these packages only.",
-        "If the tools are detected, the build will continue automatically.",
-        "Otherwise, restart the builder and select the ISO again.",
-    ])
-    if found:
-        report, _missing = format_prereq_report(found)
-        lines.extend(["", "Current tool status:", report])
-    return "\n".join(lines)
-
-
 def licenses_dir():
     """Location of the embedded/shipped license notices, or None."""
     for base in (resource_dir(), Path(__file__).resolve().parent):
@@ -117,11 +83,6 @@ def licenses_dir():
         except OSError:
             continue
     return None
-
-
-def game_launch_target(pes6_dir):
-    """Return the executable path to auto-launch after a successful build."""
-    return Path(pes6_dir) / "pes6.exe"
 
 
 def launch_game(exe_path, game_path, launcher_path=None):
@@ -149,6 +110,35 @@ def launch_game(exe_path, game_path, launcher_path=None):
     return exe
 
 
+def remove_installer_after_exit():
+    """Delete only this frozen installer, without leaving a cleanup script."""
+    if not getattr(sys, "frozen", False):
+        return
+    executable = Path(sys.executable).resolve()
+    digest = hashlib.sha256()
+    with executable.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    path = str(executable).replace("'", "''")
+    script = (
+        f"$p='{path}'; $expected='{digest.hexdigest()}'; "
+        "for($i=0;$i -lt 60;$i++){"
+        "try{"
+        "if(!(Test-Path -LiteralPath $p -PathType Leaf -ErrorAction Stop)){exit 0};"
+        "if((Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash -ne $expected){exit 1};"
+        "Remove-Item -LiteralPath $p -Force -ErrorAction Stop;exit 0}"
+        "catch{Start-Sleep -Milliseconds 500}};exit 1"
+    )
+    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / (
+        "System32/WindowsPowerShell/v1.0/powershell.exe")
+    return subprocess.Popen(
+        [str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand",
+         base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=CREATE_NO_WINDOW,
+    )
+
+
 def resource_dir():
     return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
@@ -171,7 +161,7 @@ def load_drop_helpers():
     raise ImportError("win32_drop helper module is missing from this installation.")
 
 
-class CancelledError(RuntimeError):
+class CancelledError(dependencies.BootstrapCancelled):
     """Raised when the user cancels a running build."""
 
 
@@ -191,10 +181,7 @@ def which(name):
 
 
 def find_rc():
-    candidates = glob.glob(r"C:/Program Files (x86)/Windows Kits/10/bin/*/x64/rc.exe")
-    if not candidates:
-        return None
-    return Path(sorted(candidates)[-1])
+    return dependencies._best_rc()
 
 
 def find_msvc():
@@ -609,11 +596,10 @@ def write_build_presets(sdk, project, tools):
     """Write local CMake user presets with explicit absolute tool paths."""
     sdk = Path(sdk)
     project = Path(project)
-    for key in ("clang", "clangxx", "rc"):
+    for key in ("clang", "clangxx", "rc", "ninja"):
         if not tools.get(key):
             raise RuntimeError(
-                f"Cannot write build presets: '{key}' was not found. "
-                "Install the missing prerequisite, restart the builder, then retry."
+                f"Cannot write build presets: required tool '{key}' was not found."
             )
     clang = Path(tools["clang"])
     clangxx = Path(tools.get("clangxx") or clang.with_name("clang++.exe"))
@@ -631,6 +617,7 @@ def write_build_presets(sdk, project, tools):
                 "CMAKE_C_COMPILER": clang.as_posix(),
                 "CMAKE_CXX_COMPILER": clangxx.as_posix(),
                 "CMAKE_RC_COMPILER": rc.as_posix(),
+                "CMAKE_MAKE_PROGRAM": Path(tools["ninja"]).as_posix(),
             },
         }],
         "buildPresets": [{
@@ -647,6 +634,7 @@ def write_build_presets(sdk, project, tools):
             "cacheVariables": {
                 "CMAKE_CXX_COMPILER": clangxx.as_posix(),
                 "CMAKE_RC_COMPILER": rc.as_posix(),
+                "CMAKE_MAKE_PROGRAM": Path(tools["ninja"]).as_posix(),
                 "CMAKE_PREFIX_PATH": (sdk / "out/install/win-amd64-local").as_posix(),
             },
         }],
@@ -659,13 +647,6 @@ def write_build_presets(sdk, project, tools):
     (project / "CMakeUserPresets.json").write_text(
         json.dumps(project_presets, indent=2), encoding="utf-8"
     )
-
-
-def ensure_pes6_dir(out):
-    """Create <output>/PES6 before any DLL is copied into it."""
-    pes6 = Path(out) / "PES6"
-    pes6.mkdir(parents=True, exist_ok=True)
-    return pes6
 
 
 def stage_runtime_dlls(build_dir, pes6_dir, system32_dir, log_fn=None):
@@ -723,9 +704,15 @@ if _TK_AVAILABLE:
             self.geometry("640x440")
             self.minsize(600, 440)
             self.iso = tk.StringVar()
-            self.output = tk.StringVar(value=str(Path.home() / "Documents" / "PES6NativeBuilder"))
+            self.output = tk.StringVar(value=str(Path.home() / "Documents" / "Games"))
             self.stage_text = tk.StringVar(value="Checking prerequisites...")
             self.detail_text = tk.StringVar(value="")
+            self.progress_text = tk.StringVar(value="Select an ISO to begin")
+            self._progress_model = BuildProgress()
+            self._last_activity = time.monotonic()
+            self._process_tree = None
+            self._process_cancellable = True
+            self._closing = False
             self.msg_queue = queue.Queue()
             self.worker = None
             self.process = None
@@ -735,11 +722,6 @@ if _TK_AVAILABLE:
             self._stage_started = time.monotonic()
             self._last_line = ""
             self._build_ok = False
-            self._build_message = ""
-            self._build_error = None
-            self._launch_info = ""
-            self._launch_error = ""
-            self._pending_source = None
             self._drop_target = None
             self._build_ui()
             self.update_idletasks()
@@ -750,6 +732,7 @@ if _TK_AVAILABLE:
             self.after(100, self._drain)
             self.after(500, self._tick)
             self.after(200, self.check_prereqs)
+            self.protocol("WM_DELETE_WINDOW", self._on_close)
         def _build_ui(self):
             self.configure(background="#edf0f5")
             style = ttk.Style(self)
@@ -794,8 +777,10 @@ if _TK_AVAILABLE:
             tk.Label(frame, textvariable=self.stage_text, background="#edf0f5",
                      foreground="#18263d", font=("Segoe UI", 10, "bold"),
                      wraplength=560, height=2, anchor="w", justify="left").pack(fill="x", pady=(8, 3))
+            ttk.Label(frame, textvariable=self.progress_text, style="PES6.TLabel",
+                      wraplength=560).pack(anchor="w", pady=(0, 3))
             self.progress = ttk.Progressbar(
-                frame, mode="indeterminate", style="PES6.Horizontal.TProgressbar")
+                frame, mode="determinate", maximum=100, style="PES6.Horizontal.TProgressbar")
             self.progress.pack(fill="x", pady=(0, 4))
             tk.Label(frame, textvariable=self.detail_text, wraplength=560, height=2,
                      anchor="w", justify="left", font=("Segoe UI", 9),
@@ -817,8 +802,14 @@ if _TK_AVAILABLE:
             self.prereq_summary.pack(side="left", fill="x", expand=True)
             ttk.Button(prereq_row, text="Tool details", command=self.show_prereq_details).pack(side="right")
             self.log_visible = tk.BooleanVar(value=False)
-            ttk.Checkbutton(frame, text="Show build log", variable=self.log_visible,
-                            command=self._toggle_log).pack(anchor="w")
+            self.remove_installer = tk.BooleanVar(value=bool(getattr(sys, "frozen", False)))
+            options = ttk.Frame(frame, style="PES6.TFrame")
+            options.pack(fill="x")
+            ttk.Checkbutton(options, text="Show build log", variable=self.log_visible,
+                            command=self._toggle_log).pack(side="left")
+            if getattr(sys, "frozen", False):
+                ttk.Checkbutton(options, text="Delete this installer after success",
+                                variable=self.remove_installer).pack(side="right")
             self.log_view = tk.Text(frame, height=9, wrap="word", state="disabled",
                                     background="white", foreground="#18263d",
                                     font=("Consolas", 9), relief="flat")
@@ -851,8 +842,8 @@ if _TK_AVAILABLE:
         def log(self, message):
             self._post(("log", str(message)))
 
-        def report_stage(self, message):
-            self._post(("stage", str(message)))
+        def report_stage(self, message, key=None):
+            self._post(("stage", str(message), key))
 
         def report_progress(self, done, total, message=""):
             self._post(("progress", done, total, str(message)))
@@ -867,92 +858,57 @@ if _TK_AVAILABLE:
         def _append_log(self, message):
             self.log_view.configure(state="normal")
             self.log_view.insert("end", message + "\n")
+            if int(self.log_view.index("end-1c").split(".")[0]) > 5000:
+                self.log_view.delete("1.0", "1001.0")
             self.log_view.see("end")
             self.log_view.configure(state="disabled")
 
-        def _set_indeterminate(self):
-            try:
-                self.progress.configure(mode="indeterminate")
-                self.progress.start(100)
-            except Exception:
-                pass
-
-        def _set_determinate(self, done, total):
-            try:
-                self.progress.stop()
-                self.progress.configure(mode="determinate", maximum=max(int(total), 1))
-                self.progress.configure(value=max(min(int(done), int(total)), 0))
-            except Exception:
-                pass
+        def _render_progress(self):
+            self.progress.configure(mode="determinate", maximum=100,
+                                    value=self._progress_model.value)
+            self.progress_text.set(self._progress_model.label())
 
         def _drain(self):
-            while True:
+            for _ in range(200):
                 try:
                     message = self.msg_queue.get_nowait()
                 except queue.Empty:
                     break
                 kind = message[0] if message else ""
+                self._last_activity = time.monotonic()
                 if kind == "log":
                     self._append_log(message[1])
                     tail = message[1][-200:]
                     if tail.strip():
                         self._last_line = tail
                         self.detail_text.set(tail)
+                elif kind == "tools":
+                    self._refresh_prereq_status(message[1])
                 elif kind == "stage":
                     self._stage = message[1]
                     self._stage_started = time.monotonic()
                     self.stage_text.set(message[1])
                     self._last_line = ""
                     self.detail_text.set("")
-                    self._set_indeterminate()
+                    key = message[2] if len(message) > 2 else None
+                    if key:
+                        self._progress_model.begin(key)
+                    else:
+                        self._progress_model.update(None, None)
+                    self._render_progress()
                 elif kind == "progress":
                     _k, done, total, text = message
                     if text:
                         self.detail_text.set(text)
                         self._last_line = text
-                    try:
-                        if total and int(total) > 0 and int(done) >= 0:
-                            self._set_determinate(done, total)
-                        else:
-                            self._set_indeterminate()
-                    except (ValueError, TypeError):
-                        self._set_indeterminate()
-                elif kind == "prereqs_finished":
-                    self.cancel_button.configure(state="disabled")
-                    self.start_button.configure(state="normal")
-                    try:
-                        self.progress.stop()
-                    except Exception:
-                        pass
-                    tools = prereqs()
-                    self._refresh_prereq_status(tools)
-                    if message[1]:
-                        pending = self._pending_source
-                        still_missing = [name for name, path in tools.items() if not path]
-                        if pending is not None and not still_missing:
-                            messagebox.showinfo(
-                                "Tools installed",
-                                "Tool installation finished. Continuing your requested build now.",
-                            )
-                            self._pending_source = None
-                            self.iso.set(pending)
-                            self._update_start_state()
-                            self.after(200, self.start)
-                        elif pending is not None:
-                            messagebox.showwarning(
-                                "Tools still missing",
-                                "Installation finished but these tools are still missing: "
-                                + ", ".join(still_missing)
-                                + ". Restart this builder (so PATH updates apply), then press Build and install.",
-                            )
-                        else:
-                            messagebox.showinfo("Tools installed", "Installation finished. If a tool is still missing, restart the builder and check again.")
-                    else:
-                        self._pending_source = None
-                        messagebox.showinfo("Tools", "Tool installation did not complete. Check the log, then retry.")
+                    self._progress_model.update(done, total)
+                    self._render_progress()
                 elif kind == "error":
                     _k, title, text = message
                     self._append_log(f"ERROR: {title}: {text}")
+                    if not self.log_visible.get():
+                        self.log_visible.set(True)
+                        self._toggle_log()
                     try:
                         messagebox.showerror(title, text)
                     except Exception:
@@ -960,7 +916,6 @@ if _TK_AVAILABLE:
                 elif kind == "finished":
                     _k, ok, text = message
                     self._build_ok = ok
-                    self._build_message = text
                     self.start_button.configure(state="normal")
                     self.cancel_button.configure(state="disabled")
                     try:
@@ -968,23 +923,15 @@ if _TK_AVAILABLE:
                     except Exception:
                         pass
                     if ok:
+                        self._progress_model.finish()
+                        self._render_progress()
                         self.stage_text.set(self._stage)
-                        launch_note = ""
-                        launch_info = getattr(self, "_launch_info", "")
-                        if launch_info:
-                            launch_note = f"\n\nGame started: {launch_info}"
-                        elif getattr(self, "_launch_error", ""):
-                            launch_note = (
-                                "\n\nBuild succeeded, but automatic launch failed: "
-                                f"{self._launch_error}"
-                            )
                         try:
-                            messagebox.showinfo(
-                                "Build complete",
-                                (text or "Build complete.") + launch_note,
-                            )
+                            messagebox.showinfo("Installation complete", text)
                         except Exception:
                             pass
+                        self._on_close()
+                        return
             self.after(100, self._drain)
 
         def _tick(self):
@@ -992,7 +939,9 @@ if _TK_AVAILABLE:
                 if self.worker is not None and self.worker.is_alive():
                     elapsed = int(time.monotonic() - self._stage_started)
                     minutes, seconds = divmod(elapsed, 60)
-                    self.stage_text.set(f"{self._stage} ({minutes}m {seconds:02d}s elapsed)")
+                    inactive = int(time.monotonic() - self._last_activity)
+                    self.stage_text.set(
+                        f"{self._stage} ({minutes}m {seconds:02d}s; last activity {inactive}s ago)")
                     if self._last_line and not self.detail_text.get():
                         self.detail_text.set(self._last_line[-220:])
             except Exception:
@@ -1016,7 +965,7 @@ if _TK_AVAILABLE:
                         text=f"Missing tools: {', '.join(missing)}. Selecting an ISO will ask to install them."
                     )
                 else:
-                    self.prereq_summary.configure(text="All build tools found. Drop your ISO to start.")
+                    self.prereq_summary.configure(text="Tools detected; versions are checked during setup.")
             except Exception:
                 pass
             self._update_start_state()
@@ -1030,57 +979,10 @@ if _TK_AVAILABLE:
             except Exception:
                 pass
 
-        def install_prereqs(self, after_install=None):
-            if self.worker and self.worker.is_alive():
-                return False
-            found = prereqs()
-            packages = missing_winget_packages(found)
-            if not packages:
-                self._refresh_prereq_status(found)
-                return True
-            winget = which("winget.exe")
-            if not winget:
-                messagebox.showerror("Windows Package Manager missing",
-                                     "Install App Installer from Microsoft, then restart the builder.")
-                return False
-            if not messagebox.askyesno(
-                "Install build tools",
-                winget_consent_text(packages, found),
-            ):
-                return False
-            self._pending_source = after_install
-            self.cancel_event.clear()
-            self.start_button.configure(state="disabled")
-            self.cancel_button.configure(state="normal")
-            self.worker = threading.Thread(target=self._install_prereqs_worker,
-                                           args=(winget, packages), daemon=True)
-            self.worker.start()
-            return True
-
-        def _install_prereqs_worker(self, winget, packages):
-            ok = False
-            try:
-                for package in packages:
-                    self.report_stage(f"Installing {package}...")
-                    command = [str(winget), "install", "--id", package, "-e",
-                               "--accept-package-agreements", "--accept-source-agreements",
-                               "--disable-interactivity"]
-                    if package == "Microsoft.VisualStudio.2022.BuildTools":
-                        command += ["--override", WINGET_VS_OVERRIDE]
-                    self.run(command)
-                ok = True
-            except CancelledError:
-                self.log("Tool installation cancelled.")
-            except Exception as error:
-                self.log(traceback.format_exc())
-                self.report_error("Tool installation failed", str(error))
-            finally:
-                self._post(("prereqs_finished", ok))
-
         def check_prereqs(self):
             self._refresh_prereq_status()
             if self._prereq_missing:
-                self.set_status("Select your ISO; the builder will offer to install missing tools.")
+                self.set_status("Ready. Missing build tools will be downloaded automatically.")
             else:
                 self.set_status("Ready. Drop your ISO or press Select ISO.")
 
@@ -1088,17 +990,10 @@ if _TK_AVAILABLE:
             report = self._prereq_report or format_prereq_report(prereqs())[0]
             message = (
                 report
-                + "\n\nIf something is missing, install it, close and reopen any terminals, "
-                + "then restart this builder so PATH updates apply. Recommended winget commands:\n"
-                + "  winget install --id Git.Git -e\n"
-                + "  winget install --id Kitware.CMake -e\n"
-                + "  winget install --id Ninja-build.Ninja -e\n"
-                + "  winget install --id LLVM.LLVM -e\n"
-                + "  winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "
-                + f"\"{WINGET_VS_OVERRIDE}\"\n"
-                + "Notes: rc.exe comes from the Windows SDK (included above, ~7 GB, needs "
-                + "admin rights). Restart this builder after installing so PATH updates apply. "
-                + f"Source: v{VERSION} tag; SDK: {SDK_COMMIT}."
+                + "\n\nRequired missing tools are fetched automatically when you select an ISO. "
+                "Portable build tools are removed after installation. Microsoft compiler/SDK "
+                "components may require administrator approval and remain installed if shared."
+                + f"\n\nSource: v{VERSION}; SDK: {SDK_COMMIT}."
             )
             try:
                 messagebox.showinfo("Prerequisites", message)
@@ -1139,11 +1034,10 @@ if _TK_AVAILABLE:
                 self.output.set(path)
 
         def open_output(self):
-            path = Path(self.output.get()).expanduser()
-            try:
-                path.mkdir(parents=True, exist_ok=True)
-            except OSError as error:
-                self.log(f"Cannot create output folder {path}: {error}")
+            root = Path(self.output.get()).expanduser()
+            path = root / "PES6" if (root / "PES6").is_dir() else root
+            if not path.is_dir():
+                self.log(f"The output folder has not been created yet: {path}")
                 return
             if hasattr(os, "startfile"):
                 try:
@@ -1177,7 +1071,6 @@ if _TK_AVAILABLE:
                 messagebox.showerror("Licenses", f"Cannot open {folder}: {error}")
 
         def start_build_requested(self):
-            self._pending_source = None
             self.start()
 
         def start(self):
@@ -1190,24 +1083,25 @@ if _TK_AVAILABLE:
             if not Path(source).exists():
                 messagebox.showerror("Missing source", "The selected ISO or folder does not exist.")
                 return
-            found = prereqs()
-            missing = [name for name, path in found.items() if not path]
-            if missing:
-                # Selecting/dropping the ISO leads straight into the flow:
-                # offer the existing winget setup with explicit consent, then
-                # continue the requested build automatically when tools arrive.
-                self._refresh_prereq_status(found)
-                self.install_prereqs(after_install=source)
-                return
             out = Path(self.output.get()).expanduser().resolve()
+            if os.path.lexists(out / "PES6"):
+                messagebox.showerror(
+                    "Installation already exists",
+                    f"{out / 'PES6'} already exists and will not be overwritten. "
+                    "Open the existing game or choose a different output folder.",
+                )
+                return
+            if not messagebox.askyesno("Install PES6", dependencies.bootstrap_consent(prereqs())):
+                return
             try:
                 out.mkdir(parents=True, exist_ok=True)
             except OSError as error:
                 messagebox.showerror("Output folder", f"Cannot create {out}: {error}")
                 return
             self.cancel_event.clear()
+            self._progress_model = BuildProgress()
+            self._last_activity = time.monotonic()
             self._build_ok = False
-            self._build_error = None
             self.start_button.configure(state="disabled")
             self.cancel_button.configure(state="normal")
             self.worker = threading.Thread(target=self.build_worker, args=(Path(source), out), daemon=True)
@@ -1216,78 +1110,98 @@ if _TK_AVAILABLE:
         def cancel(self):
             self.cancel_event.set()
             with self._process_lock:
-                proc = self.process
-            if proc is not None:
-                try:
-                    if proc.poll() is None:
-                        proc.kill()
-                except Exception:
-                    pass
-            self.log("Cancellation requested...")
+                tree = self._process_tree
+                cancellable = self._process_cancellable
+            if tree is not None and cancellable:
+                tree.terminate()
+            if tree is not None and not cancellable:
+                self.report_stage("Finishing Windows component installation before cancelling...")
+                self.log("Cancellation will continue after the shared Windows installer finishes safely.")
+            else:
+                self.log("Cancellation requested...")
+
+        def _on_close(self):
+            if self.worker and self.worker.is_alive():
+                if not self._closing and not self._build_ok:
+                    self._closing = True
+                    self.cancel()
+                self.after(100, self._on_close)
+            else:
+                if self._build_ok and self.remove_installer.get():
+                    try:
+                        remove_installer_after_exit()
+                    except OSError as error:
+                        messagebox.showwarning(
+                            "Installer cleanup",
+                            f"The game is installed, but this downloaded installer could not "
+                            f"be removed automatically: {error}\nYou can delete it manually.",
+                        )
+                self.destroy()
 
         # -- Worker-thread build steps (never touch Tk widgets directly). --
-        def run(self, command, cwd=None):
+        def run(self, command, cwd=None, allowed_exit_codes=(0,), cancellable=True):
+            if self.cancel_event.is_set():
+                raise CancelledError("cancelled by user")
+            if not cancellable:
+                self.report_stage("Installing shared Windows components; waiting for Windows setup...")
             self.log("> " + " ".join(str(part) for part in command))
             command = [str(part) for part in command]
             try:
                 proc = subprocess.Popen(
-                    command,
-                    cwd=str(cwd) if cwd else None,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
+                    command, cwd=str(cwd) if cwd else None,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                     errors="replace",
-                    creationflags=CREATE_NO_WINDOW,
-                )
-            except FileNotFoundError:
-                raise RuntimeError(
-                    f"Cannot start '{command[0]}': not found. Re-check prerequisites and retry."
+                    creationflags=(CREATE_NO_WINDOW | 4) if os.name == "nt" else 0,
+                    start_new_session=os.name != "nt",
                 )
             except OSError as error:
-                raise RuntimeError(f"Cannot start '{command[0]}': {error}.")
-            with self._process_lock:
-                if self.cancel_event.is_set():
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                    self.process = None
-                    raise CancelledError("cancelled by user")
-                self.process = proc
+                raise RuntimeError(f"Cannot start '{command[0]}': {error}") from error
+            tree = None
             try:
+                tree = ProcessTree(proc)
+                with self._process_lock:
+                    self.process = proc
+                    self._process_tree = tree
+                    self._process_cancellable = cancellable
+                    if self.cancel_event.is_set() and cancellable:
+                        tree.terminate()
+                output = deque(maxlen=200)
                 assert proc.stdout is not None
-                last = ""
                 for raw in proc.stdout:
-                    if self.cancel_event.is_set():
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
+                    if self.cancel_event.is_set() and cancellable:
+                        tree.terminate()
                         raise CancelledError("cancelled by user")
                     line = raw.rstrip("\r\n")
                     if line.strip():
                         self.log(line)
-                        last = line[-200:]
+                        output.append(line)
+                        count = NINJA_PROGRESS.match(line)
+                        if count:
+                            self.report_progress(int(count[1]), int(count[2]), line)
                 code = proc.wait()
             finally:
                 with self._process_lock:
-                    if self.process is proc:
-                        self.process = None
-                try:
-                    if proc.stdout is not None:
-                        proc.stdout.close()
-                except Exception:
-                    pass
+                    self.process = None
+                    self._process_tree = None
+                    self._process_cancellable = True
+                if tree is not None:
+                    tree.close()
+                elif proc.poll() is None:
+                    proc.kill()
+                proc.wait()
+                if proc.stdout is not None:
+                    proc.stdout.close()
             if self.cancel_event.is_set():
                 raise CancelledError("cancelled by user")
-            if code != 0:
-                hint = f" (last output: {last})" if last else ""
+            if code not in allowed_exit_codes:
+                hint = "\n" + "\n".join(list(output)[-8:]) if output else ""
                 raise RuntimeError(f"Command failed with exit code {code}: {command[0]}{hint}")
+            if code == 3010:
+                self.log("The Microsoft installer recommends a reboot; checking whether the tools are usable now.")
+            return "\n".join(output)
 
         def download(self, url, destination):
-            self.report_stage(f"Downloading {Path(destination).name}...")
             self.log(f"Downloading {url}")
             destination = Path(destination)
             tmp = destination.parent / (destination.name + ".part")
@@ -1326,6 +1240,7 @@ if _TK_AVAILABLE:
                     pass
                 raise RuntimeError(f"Cannot save download to {destination}: {error}.")
             self.log(f"Downloaded {destination.name}")
+            self.report_progress(None, None, "Download complete; continuing setup...")
 
         def _load_xdvdfs(self):
             try:
@@ -1487,28 +1402,9 @@ if _TK_AVAILABLE:
                 )
             return game_out
 
-        def write_launcher(self, out, game):
-            pes6 = ensure_pes6_dir(out)
-            config = pes6 / "pes6.toml"
-            config.write_text(
-                "# PES6 native runtime configuration\n"
-                "mnk_mode = true\n"
-                "game_data_root = " + json.dumps(str(game), ensure_ascii=True) + "\n",
-                encoding="utf-8",
-            )
-            launcher = pes6 / "Play PES6.cmd"
-            launcher.write_text(
-                "@echo off\r\n"
-                "setlocal\r\n"
-                "set \"ROOT=%~dp0\"\r\n"
-                "\"%ROOT%pes6.exe\" --game_data_root=\"" + str(game) + "\"\r\n",
-                encoding="utf-8",
-            )
-
-        def extract_icon(self, out, game):
-            out = Path(out)
-            icon_out = out / "_icons"
-            exe = out / "rexglue-sdk/out/install/win-amd64-local/bin/rexglue.exe"
+        def extract_icon(self, workspace, game, destination):
+            icon_out = Path(workspace) / "_icons"
+            exe = Path(workspace) / "rexglue-sdk/out/install/win-amd64-local/bin/rexglue.exe"
             if not exe.is_file() or PILImage is None:
                 self.log("Icon step skipped (missing SDK tool or Pillow).")
                 return
@@ -1520,124 +1416,129 @@ if _TK_AVAILABLE:
                     str(game / "default.xex"), str(icon_out),
                 ])
                 title = icon_out / "icons/title.png"
-                final_icon = out / "PES6/title.ico"
+                final_icon = Path(destination) / "title.ico"
                 if title.is_file():
-                    image = PILImage.open(title).convert("RGBA")
-                    image.save(final_icon, sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+                    with PILImage.open(title) as image:
+                        image.convert("RGBA").save(
+                            final_icon, sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
                     self.log(f"Wrote original title icon to {final_icon}")
+            except CancelledError:
+                raise
             except Exception as error:
                 self.log(f"Icon extraction skipped: {error}")
 
         def build_worker(self, source, out):
+            original_path = os.environ.get("PATH", "")
+            final = None
             try:
-                tools = prereqs()
-                missing = [name for name, path in tools.items() if not path]
-                if missing:
-                    raise RuntimeError(
-                        "Missing prerequisites: " + ", ".join(missing)
-                        + ". Restart the builder after installing them, then retry."
+                with BuildSession(out) as session:
+                    session.check_destination_free()
+                    workspace = session.workspace
+                    self.report_stage("Preparing required build tools...", "tools")
+                    tools = dependencies.ensure_tools(
+                        workspace, prereqs(), download=self.download, run=self.run,
+                        log=self.log, progress=self.report_progress,
+                        cancelled=self.cancel_event.is_set,
                     )
-                for tool in tools.values():
-                    if tool:
-                        os.environ["PATH"] = str(Path(tool).parent) + os.pathsep + os.environ.get("PATH", "")
-                self.report_stage("Preparing project source...")
-                project = self.prepare_source(out)
-                patch = out / "patches/rexglue-sdk.patch"
-                if not patch.is_file():
-                    raise RuntimeError(f"Required SDK patch is missing: {patch}. Choose a fresh output folder.")
-                if self.cancel_event.is_set():
-                    raise CancelledError("cancelled by user")
-                game = self.extract_game(source, out)
-                if self.cancel_event.is_set():
-                    raise CancelledError("cancelled by user")
-                sdk = out / "rexglue-sdk"
-                if not (sdk / ".git").is_dir():
-                    self.report_stage("Downloading ReXGlue SDK (several minutes)...")
-                    self.log("Cloning the pinned SDK (no submodules yet; checkout comes first).")
-                    self.run([str(tools["git"]), "clone", "--progress", SDK_URL, str(sdk)])
-                else:
-                    self.log("ReXGlue SDK checkout already present; verifying pinned revision.")
-                self.report_stage("Checking out the pinned SDK revision...")
-                self.run([str(tools["git"]), "checkout", SDK_COMMIT], cwd=sdk)
-                self.report_stage("Fetching SDK submodules (several minutes)...")
-                self.run([str(tools["git"]), "submodule", "update", "--init", "--recursive", "--progress"], cwd=sdk)
-                self.report_stage("Applying SDK patch...")
-                git_apply_safe(str(tools["git"]), sdk, patch, log_fn=self.log)
-                self.report_stage("Repairing SDK symlinks for Windows...")
-                fixed = repair_libmspack_stubs(sdk)
-                self.log(f"libmspack stub repair: {fixed} file(s).")
-                write_build_presets(sdk, project, tools)
-                self.report_stage("Configuring ReXGlue SDK...")
-                self.run([str(tools["cmake"]), "--preset", "win-amd64-local"], cwd=sdk)
-                self.report_stage("Building ReXGlue SDK (10-30 minutes, progress below)...")
-                self.run([str(tools["cmake"]), "--build", "--preset", "win-amd64-local-release", "--target", "install"], cwd=sdk)
-                rexglue = sdk / "out/install/win-amd64-local/bin/rexglue.exe"
-                if not rexglue.is_file():
-                    raise RuntimeError(
-                        f"SDK build finished without {rexglue}. "
-                        "See the build log above for the compile error."
-                    )
-                self.report_stage("Generating native game code...")
-                self.run([str(rexglue), "codegen", "pes6_manifest.toml", "--ignore-stamp"], cwd=project)
-                if not (project / "generated").is_dir():
-                    raise RuntimeError(
-                        "Code generation finished without project/generated. "
-                        "Check that game/default.xex exists and see the log above."
-                    )
-                self.report_stage("Configuring the native game build...")
-                self.run([str(tools["cmake"]), "--preset", "win-amd64-release-local"], cwd=project)
-                self.report_stage("Compiling the native game (long step, progress below)...")
-                self.run([str(tools["cmake"]), "--build", "--preset", "win-amd64-release-local"], cwd=project)
-                self.report_stage("Assembling the final game...")
-                build = project / "out/build/win-amd64-release-local"
-                pes6 = ensure_pes6_dir(out)
-                system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
-                stage_runtime_dlls(build, pes6, system32, log_fn=self.log)
-                self.write_launcher(out, game)
-                self.extract_icon(out, game)
-                if not (pes6 / "pes6.exe").is_file() or not (pes6 / "Play PES6.cmd").is_file():
-                    raise RuntimeError(
-                        f"Assembly finished without the expected files in {pes6}. "
-                        "Check disk space and the log above."
-                    )
-                self.report_stage("Build complete.")
-                exe_path = game_launch_target(pes6)
-                launcher_path = pes6 / "Play PES6.cmd"
-                self.log(f"Build complete: {exe_path}")
-                self.log(f"Launcher: {launcher_path}")
-                self.log("Your ISO and extracted game were not modified.")
-                launch_error = ""
-                try:
-                    launched = launch_game(exe_path, game, launcher_path)
-                    self.log(f"Launched: {launched}")
-                    self._launch_info = str(launched)
-                    self._launch_error = ""
-                except RuntimeError as error:
-                    # The build itself succeeded; only the auto-launch failed.
-                    launch_error = str(error)
-                    self.log(f"Automatic launch failed: {launch_error}")
-                    self._launch_info = ""
-                    self._launch_error = launch_error
+                    self._post(("tools", tools))
+                    tool_dirs = [str(Path(tools[key]).parent)
+                                 for key in ("rc", "git", "cmake", "ninja", "clang", "clangxx")
+                                 if tools.get(key)]
+                    os.environ["PATH"] = os.pathsep.join(tool_dirs + [os.environ.get("PATH", "")])
+                    self.report_stage("Preparing project source...", "source")
+                    project = self.prepare_source(workspace)
+                    patch = workspace / "patches/rexglue-sdk.patch"
+                    if not patch.is_file():
+                        raise RuntimeError(f"The bundled SDK patch is missing: {patch}")
+                    self.report_stage("Importing your game data...", "extract")
+                    game = self.extract_game(source, workspace)
+                    if self.cancel_event.is_set():
+                        raise CancelledError("cancelled by user")
+                    sdk = workspace / "rexglue-sdk"
+                    self.report_stage("Downloading ReXGlue SDK...", "sdk_download")
+                    git = [str(tools["git"]), "-c", "core.longpaths=true",
+                           "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=120"]
+                    self.run(git + ["clone", "--progress", SDK_URL, str(sdk)])
+                    self.report_stage("Selecting the required SDK version...")
+                    self.run(git + ["checkout", SDK_COMMIT], cwd=sdk)
+                    self.report_stage("Downloading SDK components...")
+                    self.run(git + ["submodule", "update", "--init", "--recursive", "--progress"], cwd=sdk)
+                    self.report_stage("Configuring the SDK...", "sdk_configure")
+                    git_apply_safe(str(tools["git"]), sdk, patch, log_fn=self.log)
+                    fixed = repair_libmspack_stubs(sdk)
+                    self.log(f"Repaired {fixed} Windows SDK symlink placeholders.")
+                    write_build_presets(sdk, project, tools)
+                    self.run([tools["cmake"], "--preset", "win-amd64-local"], cwd=sdk)
+                    self.report_stage("Building the native runtime...", "sdk_build")
+                    self.run([tools["cmake"], "--build", "--preset", "win-amd64-local-release",
+                              "--target", "install", "--parallel", "2"], cwd=sdk)
+                    rexglue = sdk / "out/install/win-amd64-local/bin/rexglue.exe"
+                    if not rexglue.is_file():
+                        raise RuntimeError(f"The runtime build did not produce {rexglue}.")
+                    self.report_stage("Generating native game code...", "codegen")
+                    self.run([rexglue, "codegen", "pes6_manifest.toml", "--ignore-stamp"], cwd=project)
+                    if not (project / "generated").is_dir():
+                        raise RuntimeError("Code generation did not produce the native game source.")
+                    self.report_stage("Configuring the game...", "game_configure")
+                    self.run([tools["cmake"], "--preset", "win-amd64-release-local"], cwd=project)
+                    self.report_stage("Compiling your game...", "game_build")
+                    self.run([tools["cmake"], "--build", "--preset", "win-amd64-release-local",
+                              "--parallel", "2"], cwd=project)
+                    self.report_stage("Assembling the installation...", "assemble")
+                    build = project / "out/build/win-amd64-release-local"
+                    system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+                    _, _, missing = stage_runtime_dlls(
+                        build, session.staging, system32, log_fn=self.log)
+                    if missing:
+                        raise RuntimeError("Microsoft runtime installation is incomplete: " + ", ".join(missing))
+                    self.extract_icon(workspace, game, session.staging)
+                    game.rename(session.staging / "game")
+                    write_runtime_config(session.staging, session.destination / "game")
+                    write_launcher(session.staging)
+                    copy_notices(repo_source_root() or resource_dir(), session.staging)
+                    if self.cancel_event.is_set():
+                        raise CancelledError("cancelled by user")
+                    final = session.publish()
+                    self.report_stage("Removing temporary build files...", "cleanup")
+                # The source, SDK, compilers and build products are gone before any game starts.
+                exe_path = final / "pes6.exe"
+                launcher_path = final / "Play PES6.cmd"
                 message = (
-                    "Build complete.\n\n"
-                    f"Game: {exe_path}\n"
-                    f"Launcher: {launcher_path}\n"
-                    "Your ISO and extracted game were not modified."
+                    f"Installed successfully.\n\nGame: {exe_path}\n"
+                    f"Launcher: {launcher_path}\n\nTemporary build files were removed."
                 )
-                if launch_error:
-                    message += f"\n\nAutomatic launch failed: {launch_error}"
-                else:
-                    message += "\n\nThe game was launched automatically."
+                try:
+                    launch_game(exe_path, final / "game", launcher_path)
+                    message += "\nThe game was started."
+                except RuntimeError as error:
+                    self.log(str(error))
+                    message += f"\n\nAutomatic launch failed: {error}"
+                try:
+                    os.startfile(final)
+                except OSError as error:
+                    self.log(f"Cannot open the game folder: {error}")
+                    message += f"\n\nOpen this folder manually: {final}"
+                self.report_stage("Installation complete.")
                 self.report_finished(True, message)
-            except CancelledError:
-                self.log("Build cancelled.")
-                self.report_stage("Build cancelled.")
-                self.report_finished(False, "cancelled")
             except Exception as error:
-                self.log(traceback.format_exc())
-                self.report_stage("Build failed. See the log above.")
-                self.report_error("Build failed", str(error))
-                self.report_finished(False, str(error))
+                if not isinstance(error, WorkspaceCleanupError) and (
+                    isinstance(error, dependencies.BootstrapCancelled) or self.cancel_event.is_set()
+                ):
+                    self.log("Installation cancelled; temporary files were removed.")
+                    self.report_stage("Installation cancelled.")
+                    self.report_finished(False, "cancelled")
+                else:
+                    self.log(traceback.format_exc())
+                    title = "Installation incomplete" if final else "Installation failed"
+                    text = str(error)
+                    if final:
+                        text += f"\n\nThe installed game is at {final}."
+                    self.report_stage(f"{title}. See the build log.")
+                    self.report_error(title, text)
+                    self.report_finished(False, text)
+            finally:
+                os.environ["PATH"] = original_path
+                self._post(("tools", None))
 
 
     if __name__ == "__main__":

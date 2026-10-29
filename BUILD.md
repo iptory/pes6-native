@@ -31,10 +31,27 @@ files or generated game code. Packaging reads the current working-tree contents
 of tracked files, so review changes before publishing. The builder still
 downloads the pinned SDK and its submodules.
 
-The builder can install missing Windows tools through `winget` after the user
-approves the package list. The compiler and Windows SDK remain necessary for
-local compilation. Selecting an ISO starts the build; successful completion
-displays the output paths and starts the compiled game with its data path.
+The packaged builder does not require Python or `winget` on the user's PC.
+It downloads hash-pinned portable Git, CMake, Ninja and LLVM archives when
+required. Missing Microsoft C++ tools, Windows SDK and runtime components use
+official signed Microsoft installers, with Windows administrator approval.
+Tool detection is refreshed immediately.
+
+All private source, SDK and portable tools live in a uniquely owned temporary
+workspace under the chosen output root. The completed runtime is published as
+`PES6` only after assembly; an occupied destination is refused. The workspace
+is removed before the game or output folder opens, including on build failure
+or cancellation. Shared Windows installations and user inputs are preserved.
+Cancellation waits safely for a shared Microsoft component installation to
+finish. A cleanup error reports its exact remaining path rather than claiming
+that deletion succeeded.
+
+The final game contains runtime files, imported game data, `pes6.toml`, a
+launcher, icon and required license notices. `log_to_file = false` disables
+persistent runtime logs by default. Estimated overall progress is distinct
+from real byte/file/Ninja counters. The packaged installer can remove its own
+unchanged download after successful completion; it never deletes the source
+Python interpreter.
 
 ## 1. Clone and patch ReXGlue
 

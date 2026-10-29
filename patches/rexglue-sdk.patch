@@ -99,62 +99,6 @@ index 20a2cd8..2e7829d 100644
    {
      std::unique_lock<std::mutex> guard(frames_mutex_);
      frames_queued_.push(output_frame);
-diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
-index 228728d..018649a 100644
---- a/src/core/cvar.cpp
-+++ b/src/core/cvar.cpp
-@@ -535,13 +535,41 @@ std::vector<std::string> ListModifiedFlags() {
-   return result;
- }
- 
-+std::string EscapeTomlString(std::string_view value) {
-+  std::string result;
-+  result.reserve(value.size() + 8);
-+  for (char c : value) {
-+    switch (c) {
-+      case '\\':
-+        result += "\\\\";
-+        break;
-+      case '"':
-+        result += "\\\"";
-+        break;
-+      case '\n':
-+        result += "\\n";
-+        break;
-+      case '\r':
-+        result += "\\r";
-+        break;
-+      case '\t':
-+        result += "\\t";
-+        break;
-+      default:
-+        result += c;
-+        break;
-+    }
-+  }
-+  return result;
-+}
-+
- std::string SerializeToTOML() {
-   std::lock_guard lock(GetRegistryMutex());
-   std::string result;
-   for (const auto& entry : GetRegistryStorage()) {
-     if (entry.getter() != entry.default_value) {
-       if (entry.type == FlagType::String) {
--        result += entry.name + " = \"" + entry.getter() + "\"\n";
-+        result += entry.name + " = \"" + EscapeTomlString(entry.getter()) + "\"\n";
-       } else {
-         result += entry.name + " = " + entry.getter() + "\n";
-       }
-@@ -556,7 +584,7 @@ std::string SerializeToTOML(std::string_view category) {
-   for (const auto& entry : GetRegistryStorage()) {
-     if (entry.category == category && entry.getter() != entry.default_value) {
-       if (entry.type == FlagType::String) {
--        result += entry.name + " = \"" + entry.getter() + "\"\n";
-+        result += entry.name + " = \"" + EscapeTomlString(entry.getter()) + "\"\n";
-       } else {
-         result += entry.name + " = " + entry.getter() + "\n";
-       }
 diff --git a/src/filesystem/virtual_file_system.cpp b/src/filesystem/virtual_file_system.cpp
 index a1b4dad..a9f37dd 100644
 --- a/src/filesystem/virtual_file_system.cpp
@@ -1289,3 +1233,210 @@ index 306118e..f27e227 100644
    // Begin the command list with the command allocator not currently potentially
    // used on the GPU.
    UINT64 current_paint_submission = paint_context_.paint_submission_tracker.GetCurrentSubmission();
+diff --git a/include/rex/logging/api.h b/include/rex/logging/api.h
+index be0497b..22ab08e 100644
+--- a/include/rex/logging/api.h
++++ b/include/rex/logging/api.h
+@@ -21,6 +21,7 @@
+ // Logging CVAR declarations (defined in logging.cpp)
+ REXCVAR_DECLARE(std::string, log_level);
+ REXCVAR_DECLARE(std::string, log_file);
++REXCVAR_DECLARE(bool, log_to_file);
+ REXCVAR_DECLARE(bool, log_verbose);
+ REXCVAR_DECLARE(bool, log_noisy);
+ REXCVAR_DECLARE(int32_t, log_flush_interval);
+diff --git a/src/codegen/config.cpp b/src/codegen/config.cpp
+index 5da54a0..ff08939 100644
+--- a/src/codegen/config.cpp
++++ b/src/codegen/config.cpp
+@@ -19,6 +19,7 @@
+ #include <fmt/format.h>
+ 
+ #include <rex/codegen/config.h>
++#include <rex/filesystem.h>
+ #include <rex/logging.h>
+ 
+ #include "codegen_logging.h"
+@@ -401,7 +402,7 @@ bool LoadRecursive(const std::filesystem::path& filePath, RecompilerConfig& cfg,
+     REXCODEGEN_ERROR("[config] cannot resolve path '{}': {}", filePath.string(), ec.message());
+     return false;
+   }
+-  std::string canonicalStr = canonical.string();
++  std::string canonicalStr = rex::path_to_utf8(canonical);
+   if (visited.contains(canonicalStr)) {
+     REXCODEGEN_ERROR("[config] circular include detected: {}", canonicalStr);
+     return false;
+diff --git a/src/codegen/manifest.cpp b/src/codegen/manifest.cpp
+index 4065fdb..4aca263 100644
+--- a/src/codegen/manifest.cpp
++++ b/src/codegen/manifest.cpp
+@@ -20,6 +20,7 @@
+ 
+ #include <toml++/toml.hpp>
+ 
++#include <rex/filesystem.h>
+ #include <rex/logging.h>
+ #include <rex/system/guest_path.h>
+ 
+@@ -73,9 +74,9 @@ bool LoadBinaryConfig(const toml::table& tbl, const std::filesystem::path& base_
+ std::optional<ManifestConfig> ManifestConfig::Load(const std::filesystem::path& path) {
+   toml::table tbl;
+   try {
+-    tbl = toml::parse_file(path.string());
++    tbl = toml::parse_file(rex::path_to_utf8(path));
+   } catch (const toml::parse_error& err) {
+-    REXLOG_ERROR("Failed to parse manifest {}: {}", path.string(), err.what());
++    REXLOG_ERROR("Failed to parse manifest {}: {}", rex::path_to_utf8(path), err.what());
+     return std::nullopt;
+   }
+ 
+@@ -152,7 +153,7 @@ std::optional<ManifestConfig> ManifestConfig::Load(const std::filesystem::path&
+ 
+ bool ManifestConfig::IsManifest(const std::filesystem::path& path) {
+   try {
+-    auto tbl = toml::parse_file(path.string());
++    auto tbl = toml::parse_file(rex::path_to_utf8(path));
+     return tbl.contains("project");
+   } catch (const toml::parse_error&) {
+     return false;
+diff --git a/src/codegen/project_recompiler.cpp b/src/codegen/project_recompiler.cpp
+index 240bcb0..a39d9ed 100644
+--- a/src/codegen/project_recompiler.cpp
++++ b/src/codegen/project_recompiler.cpp
+@@ -26,6 +26,7 @@
+ #include <rex/codegen/codegen_context.h>
+ #include <rex/codegen/codegen_writer.h>
+ #include <rex/codegen/config.h>
++#include <rex/filesystem.h>
+ #include <rex/codegen/output_stamp.h>
+ #include <rex/codegen/progress_reporter.h>
+ #include <rex/codegen/template_registry.h>
+@@ -63,7 +64,7 @@ std::vector<std::filesystem::path> CollectModuleInputs(const RecompilerConfig& c
+   inputs.push_back(configDir / cfg.filePath);
+   inputs.push_back(manifestPath);
+   for (const auto& loaded : cfg.loadedFiles) {
+-    inputs.emplace_back(loaded);
++    inputs.emplace_back(rex::to_path(loaded));
+   }
+   if (!cfg.templateDir.empty()) {
+     std::error_code ec;
+diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
+index 228728d..38ecb56 100644
+--- a/src/core/cvar.cpp
++++ b/src/core/cvar.cpp
+@@ -20,6 +20,7 @@
+ #include <CLI/CLI.hpp>
+ 
+ #include <rex/cvar.h>
++#include <rex/filesystem.h>
+ #include <rex/logging.h>
+ #include <rex/platform/env.h>
+ 
+@@ -535,13 +536,41 @@ std::vector<std::string> ListModifiedFlags() {
+   return result;
+ }
+ 
++std::string EscapeTomlString(std::string_view value) {
++  std::string result;
++  result.reserve(value.size() + 8);
++  for (char c : value) {
++    switch (c) {
++      case '\\':
++        result += "\\\\";
++        break;
++      case '"':
++        result += "\\\"";
++        break;
++      case '\n':
++        result += "\\n";
++        break;
++      case '\r':
++        result += "\\r";
++        break;
++      case '\t':
++        result += "\\t";
++        break;
++      default:
++        result += c;
++        break;
++    }
++  }
++  return result;
++}
++
+ std::string SerializeToTOML() {
+   std::lock_guard lock(GetRegistryMutex());
+   std::string result;
+   for (const auto& entry : GetRegistryStorage()) {
+     if (entry.getter() != entry.default_value) {
+       if (entry.type == FlagType::String) {
+-        result += entry.name + " = \"" + entry.getter() + "\"\n";
++        result += entry.name + " = \"" + EscapeTomlString(entry.getter()) + "\"\n";
+       } else {
+         result += entry.name + " = " + entry.getter() + "\n";
+       }
+@@ -556,7 +585,7 @@ std::string SerializeToTOML(std::string_view category) {
+   for (const auto& entry : GetRegistryStorage()) {
+     if (entry.category == category && entry.getter() != entry.default_value) {
+       if (entry.type == FlagType::String) {
+-        result += entry.name + " = \"" + entry.getter() + "\"\n";
++        result += entry.name + " = \"" + EscapeTomlString(entry.getter()) + "\"\n";
+       } else {
+         result += entry.name + " = " + entry.getter() + "\n";
+       }
+@@ -643,7 +672,7 @@ void LoadConfig(const std::filesystem::path& config_path) {
+   }
+ 
+   try {
+-    auto config = toml::parse_file(config_path.string());
++    auto config = toml::parse_file(rex::path_to_utf8(config_path));
+     ApplyTomlTable(config, "");
+     REXLOG_DEBUG("Loaded config from {}", config_path.string());
+   } catch (const toml::parse_error& err) {
+diff --git a/src/core/logging.cpp b/src/core/logging.cpp
+index 1645848..e21bed4 100644
+--- a/src/core/logging.cpp
++++ b/src/core/logging.cpp
+@@ -38,6 +38,8 @@ REXCVAR_DEFINE_STRING(log_level, "info", "Log",
+     .allowed({"trace", "debug", "info", "warn", "error", "critical", "off"});
+ 
+ REXCVAR_DEFINE_STRING(log_file, "", "Log", "Log file path (empty = auto sequential naming)");
++REXCVAR_DEFINE_BOOL(log_to_file, true, "Log", "Write persistent log files")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
+ REXCVAR_DEFINE_BOOL(log_verbose, false, "Log", "Enable verbose logging (sets level to trace)")
+     .debug_only();
+@@ -218,12 +220,14 @@ void InitLogging(const LogConfig& config) {
+ 
+   // File sink (rotating) with sequential naming fallback
+   std::string resolved_path;
+-  if (config.log_file) {
+-    resolved_path = config.log_file;
+-  } else if (!config.app_name.empty()) {
+-    auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"
+-                                          : std::filesystem::path(config.log_dir);
+-    resolved_path = NextSequentialLogPath(log_dir, config.app_name).string();
++  if (REXCVAR_GET(log_to_file)) {
++    if (config.log_file) {
++      resolved_path = config.log_file;
++    } else if (!config.app_name.empty()) {
++      auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"
++                                            : std::filesystem::path(config.log_dir);
++      resolved_path = NextSequentialLogPath(log_dir, config.app_name).string();
++    }
+   }
+   if (!resolved_path.empty()) {
+     auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index b94fe9e..f6b7351 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -108,7 +108,7 @@ bool ReXApp::SetupEnvironment() {
+   std::filesystem::path game_dir;
+   std::string game_data_cvar = REXCVAR_GET(game_data_root);
+   if (!game_data_cvar.empty()) {
+-    game_dir = game_data_cvar;
++    game_dir = rex::to_path(game_data_cvar);
+   }
+ 
+   // User data: cvar override, or platform user directory

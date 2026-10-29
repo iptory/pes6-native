@@ -37,11 +37,14 @@ tested behavior and the remaining limits.
 - Windows 10 or Windows 11, x64, with a Direct3D 12 GPU.
 - A lawfully obtained PAL Xbox 360 copy of PES6. The tested disc image is the
   European release with title ID `4B4E07DA`.
-- Visual Studio 2022 Build Tools with the Windows SDK.
-- Microsoft Visual C++ 2015-2022 Redistributable (x64) on the target machine.
-- LLVM/Clang, CMake 3.25 or newer, Ninja, and Python 3.11 or newer.
-- `tools/configure_windows.py` writes local presets for Clang and `rc.exe`.
-- The pinned ReXGlue SDK revision and the patch in `patches/`.
+- An internet connection and enough free space for a temporary local build.
+
+The Windows builder fetches missing build tools automatically. It does not
+require Python or Windows Package Manager to be installed. Microsoft compiler,
+SDK and runtime components can require Windows administrator approval.
+
+For a manual source build, install Visual Studio 2022 C++ Build Tools with the
+Windows SDK, LLVM/Clang, CMake 3.25+, Ninja, Git and Python 3.11+.
 
 A complete build is described in [BUILD.md](BUILD.md).
 
@@ -53,18 +56,33 @@ with **Select ISO**. The build starts automatically; you can also select an
 extracted game folder or choose a different output folder before selecting the
 source.
 
-The builder needs Git, CMake, Ninja, LLVM/Clang and Visual Studio Build Tools
-with the Windows SDK. It offers to install missing tools using Windows Package
-Manager, with your approval. Downloads can be large and may require
-administrator permission. If tools are not detected afterward, restart the
-builder and select your ISO again.
+After one confirmation, missing portable Git, CMake, Ninja and LLVM tools are
+downloaded from their official releases and checked against pinned SHA-256
+digests. Missing Microsoft C++ compiler, Windows SDK and runtime components
+are obtained from Microsoft; Windows may ask for administrator approval.
+Tools are detected again without restarting the builder.
 
-The window reports progress, elapsed time and errors. By default the build is
-stored under `Documents\PES6NativeBuilder`; on success the builder displays
-the full game and launcher paths and starts the game. Use `PES6\Play PES6.cmd`
-to start it again. Game data and generated code are not uploaded. The
-**Licenses** button opens the bundled notices. Expand **Show build log** for
-command output and diagnostics.
+The compact window shows the current operation, an estimated overall percentage,
+real download/file/compile counters, elapsed time and the time since the last
+activity. Unknown totals are identified rather than displayed as completed.
+Expand **Show build log** for live diagnostics; no installer log is saved.
+
+The default game directory is `Documents\Games\PES6`. On success its folder opens,
+the game starts, and the builder displays the executable and launcher paths
+before closing. Use `PES6\Play PES6.cmd` to play again. An existing installation
+is never overwritten.
+
+Temporary source, SDK, portable tools and build files are removed on success,
+failure or cancellation. Cancelling an in-progress shared Windows component
+installation waits for that installer to finish safely. Your ISO, saves,
+settings and shared system tools are not deleted. The packaged builder also
+offers **Delete this installer after success**; it removes only its own
+unchanged downloaded executable after closing. Runtime file logging is off by
+default. Game data and generated code are never uploaded.
+
+The **Licenses** button opens the embedded notices. The installed game retains
+its required runtime configuration and license notices, not builder manifests
+or build tools.
 
 Android is not currently supported. The pinned SDK lacks Android application,
 window and storage integration, and no Android build or device run is verified.

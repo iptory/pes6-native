@@ -4,7 +4,6 @@ Run: python -m unittest discover -s builder -p "test_*.py"
 """
 
 import io
-import json
 import os
 import queue
 import shutil
@@ -12,7 +11,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 import urllib.error
 import zipfile
@@ -283,39 +281,6 @@ class StageRuntimeDllsTest(unittest.TestCase):
         self.assertTrue(any("NOTE" in line for line in logs))
 
 
-class WriteBuildPresetsTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_writes_absolute_tool_paths(self):
-        sdk = self.tmp / "sdk"
-        project = self.tmp / "project"
-        sdk.mkdir()
-        project.mkdir()
-        clang = self.tmp / "clang.exe"
-        clangxx = self.tmp / "clang++.exe"
-        rc = self.tmp / "rc.exe"
-        for tool in (clang, clangxx, rc):
-            tool.write_text("x")
-        builder.write_build_presets(sdk, project, {
-            "clang": clang, "clangxx": clangxx, "rc": rc})
-        data = json.loads((sdk / "CMakeUserPresets.json").read_text())
-        self.assertTrue(
-            data["configurePresets"][0]["cacheVariables"]["CMAKE_RC_COMPILER"].endswith("rc.exe"))
-        pdata = json.loads((project / "CMakeUserPresets.json").read_text())
-        self.assertIn("CMAKE_PREFIX_PATH", pdata["configurePresets"][0]["cacheVariables"])
-
-    def test_missing_tool_raises(self):
-        sdk = self.tmp / "sdk"
-        project = self.tmp / "project"
-        sdk.mkdir()
-        project.mkdir()
-        with self.assertRaisesRegex(RuntimeError, "'rc' was not found"):
-            builder.write_build_presets(sdk, project, {"clang": "c", "clangxx": "x"})
-
 
 
 
@@ -375,42 +340,6 @@ class PrepareSourceBundledTest(unittest.TestCase):
         self.assertEqual((out / "_source_extract" / "user-file").read_text(), "keep")
 
 
-class BuilderQueueTest(unittest.TestCase):
-    def test_worker_messages_reach_visible_log_and_status(self):
-        if not builder._TK_AVAILABLE:
-            self.skipTest("Tk unavailable")
-        app = builder.Builder.__new__(builder.Builder)
-        app.msg_queue = queue.Queue()
-        messages = []
-        app._append_log = messages.append
-        app.stage_text = mock.Mock()
-        app.detail_text = mock.Mock()
-        app._set_indeterminate = lambda: None
-        app.after = lambda *_args: None
-        app.log("download started")
-        app.report_stage("preparing")
-        app._drain()
-        self.assertEqual(messages, ["download started"])
-        app.stage_text.set.assert_called_once_with("preparing")
-
-
-class WingetConsentTest(unittest.TestCase):
-    def test_missing_tools_map_to_packages(self):
-        found = {"git": None, "cmake": Path("C:/x/cmake.exe"), "ninja": None,
-                 "clang": None, "clangxx": None, "msvc": None, "rc": None}
-        packages = builder.missing_winget_packages(found)
-        self.assertIn("Git.Git", packages)
-        self.assertIn("LLVM.LLVM", packages)
-        self.assertIn("Microsoft.VisualStudio.2022.BuildTools", packages)
-        self.assertNotIn("Kitware.CMake", packages)
-
-    def test_consent_text_names_packages_and_agreements(self):
-        text = builder.winget_consent_text(["Git.Git"], {"git": None, "cmake": "c"})
-        self.assertIn("Git.Git", text)
-        self.assertIn("administrator", text.lower())
-        self.assertIn("agreements", text.lower())
-        self.assertNotIn("--accept", text.split("Package and source agreements")[0][-50:])
-
 
 class DropValidationTest(unittest.TestCase):
     def setUp(self):
@@ -453,9 +382,6 @@ class LaunchGameTest(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_launch_target_points_at_pes6_exe(self):
-        self.assertEqual(builder.game_launch_target(self.tmp / "PES6"), self.tmp / "PES6" / "pes6.exe")
 
     def test_missing_exe_reports_build_ok_but_no_launch(self):
         with self.assertRaisesRegex(RuntimeError, "missing"):
@@ -506,56 +432,6 @@ class DropToBuildFlowTest(unittest.TestCase):
                 builder.Builder.open_licenses(app)
         showinfo.assert_called_once()
         app.log.assert_called()
-
-
-class ToolInstallationTest(unittest.TestCase):
-    def run_install(self, packages):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            installer = root / "installer.py"
-            installer.write_text(
-                "import pathlib, shlex, sys\n"
-                "root = pathlib.Path(sys.argv[1])\n"
-                "args = sys.argv[2:]\n"
-                "package = args[args.index('--id') + 1]\n"
-                "if package == 'Git.Git':\n"
-                "    print('installer refused the package', flush=True)\n"
-                "    sys.exit(33)\n"
-                "if package == 'Microsoft.VisualStudio.2022.BuildTools':\n"
-                "    options = shlex.split(args[args.index('--override') + 1])\n"
-                "    required = {'--wait', '--add', '--includeRecommended',\n"
-                "                'Microsoft.VisualStudio.Workload.VCTools'}\n"
-                "    if not required.issubset(options):\n"
-                "        sys.exit(34)\n"
-                "(root / package).write_text('installed')\n",
-                encoding="utf-8",
-            )
-            app = builder.Builder.__new__(builder.Builder)
-            app.msg_queue = queue.Queue()
-            app.cancel_event = threading.Event()
-            app._process_lock = threading.Lock()
-            app.process = None
-            app.run = lambda command: builder.Builder.run(
-                app, [sys.executable, str(installer), str(root), *command[1:]])
-            app._install_prereqs_worker(Path("winget.exe"), packages)
-            messages = list(app.msg_queue.queue)
-            installed = {path.name for path in root.iterdir() if path.name != installer.name}
-            return installed, messages
-
-    def test_visual_studio_workload_install_completes(self):
-        installed, messages = self.run_install(["Microsoft.VisualStudio.2022.BuildTools"])
-        self.assertEqual(installed, {"Microsoft.VisualStudio.2022.BuildTools"})
-        self.assertEqual(messages[-1], ("prereqs_finished", True))
-        self.assertFalse(any(message[0] == "error" for message in messages))
-
-    def test_installer_failure_stops_remaining_packages_and_surfaces_error(self):
-        installed, messages = self.run_install(["Git.Git", "Microsoft.VisualStudio.2022.BuildTools"])
-        self.assertEqual(installed, set())
-        self.assertEqual(messages[-1], ("prereqs_finished", False))
-        errors = [message[2] for message in messages if message[0] == "error"]
-        self.assertEqual(len(errors), 1)
-        self.assertIn("33", errors[0])
-        self.assertIn("installer refused the package", errors[0])
 
 
 if __name__ == "__main__":
