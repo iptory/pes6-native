@@ -49,7 +49,7 @@ A complete build is described in [BUILD.md](BUILD.md).
 
 Download `PES6Builder.exe` from the [latest release](https://github.com/iptory/pes6-native/releases/latest)
 and open it on Windows. Drop your own PAL ISO into the window or select it
-with **Browse ISO**. The build starts automatically; you can also select an
+with **Select ISO**. The build starts automatically; you can also select an
 extracted game folder or choose a different output folder before selecting the
 source.
 
@@ -63,7 +63,8 @@ The window reports progress, elapsed time and errors. By default the build is
 stored under `Documents\PES6NativeBuilder`; on success the builder displays
 the full game and launcher paths and starts the game. Use `PES6\Play PES6.cmd`
 to start it again. Game data and generated code are not uploaded. The
-**Licenses** button opens the bundled notices.
+**Licenses** button opens the bundled notices. Expand **Show build log** for
+command output and diagnostics.
 
 Android is not currently supported. The pinned SDK lacks Android application,
 window and storage integration, and no Android build or device run is verified.

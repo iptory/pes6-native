@@ -55,6 +55,19 @@ build logs.
   not exercised against a real package installation.
 - Android has not been built or run. No Android device was attached.
 
+## Builder 1.0.2 hotfix verification, 2026-10-28
+
+- 40 builder tests and 4 extractor tests passed. The installer worker executed
+  a harmless stand-in process that validates the Visual Studio C++ workload
+  options. A rejected package stopped the queue and surfaced its exit code
+  and diagnostic output. No compiler packages were installed during this check.
+- The real Tk window was exercised on an isolated desktop, including ISO/folder
+  picker cancellation, retry, folder/license actions, prerequisite details,
+  log expansion and progress updates. Normal and enlarged Tk text layouts
+  kept visible controls inside the window.
+- This hotfix does not change game runtime code. Cleanup/dependency redesign
+  and replay-audio/frame-pacing investigation are deferred.
+
 ## Known limits
 
 - The game uses a fixed 60 Hz simulation tick. The project does not retime

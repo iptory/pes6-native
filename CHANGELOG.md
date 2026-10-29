@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.2 - 2026-10-28
+
+- Fix the undefined Visual Studio installer options that stopped missing-tool
+  installation and broke the prerequisite details dialog in 1.0.1.
+- Add installer-worker regression coverage for the C++ workload and for
+  failed installations stopping the remaining package queue.
+- Refresh the compact builder window with a PES6-oriented palette, a primary
+  ISO action and an expandable build log. Keep controls visible with larger text.
+
 ## 1.0.1 - 2026-10-28
 
 - Fix source preparation and surface build stages, progress, cancellation, and errors.

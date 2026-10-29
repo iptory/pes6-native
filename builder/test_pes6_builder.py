@@ -508,5 +508,55 @@ class DropToBuildFlowTest(unittest.TestCase):
         app.log.assert_called()
 
 
+class ToolInstallationTest(unittest.TestCase):
+    def run_install(self, packages):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installer = root / "installer.py"
+            installer.write_text(
+                "import pathlib, shlex, sys\n"
+                "root = pathlib.Path(sys.argv[1])\n"
+                "args = sys.argv[2:]\n"
+                "package = args[args.index('--id') + 1]\n"
+                "if package == 'Git.Git':\n"
+                "    print('installer refused the package', flush=True)\n"
+                "    sys.exit(33)\n"
+                "if package == 'Microsoft.VisualStudio.2022.BuildTools':\n"
+                "    options = shlex.split(args[args.index('--override') + 1])\n"
+                "    required = {'--wait', '--add', '--includeRecommended',\n"
+                "                'Microsoft.VisualStudio.Workload.VCTools'}\n"
+                "    if not required.issubset(options):\n"
+                "        sys.exit(34)\n"
+                "(root / package).write_text('installed')\n",
+                encoding="utf-8",
+            )
+            app = builder.Builder.__new__(builder.Builder)
+            app.msg_queue = queue.Queue()
+            app.cancel_event = threading.Event()
+            app._process_lock = threading.Lock()
+            app.process = None
+            app.run = lambda command: builder.Builder.run(
+                app, [sys.executable, str(installer), str(root), *command[1:]])
+            app._install_prereqs_worker(Path("winget.exe"), packages)
+            messages = list(app.msg_queue.queue)
+            installed = {path.name for path in root.iterdir() if path.name != installer.name}
+            return installed, messages
+
+    def test_visual_studio_workload_install_completes(self):
+        installed, messages = self.run_install(["Microsoft.VisualStudio.2022.BuildTools"])
+        self.assertEqual(installed, {"Microsoft.VisualStudio.2022.BuildTools"})
+        self.assertEqual(messages[-1], ("prereqs_finished", True))
+        self.assertFalse(any(message[0] == "error" for message in messages))
+
+    def test_installer_failure_stops_remaining_packages_and_surfaces_error(self):
+        installed, messages = self.run_install(["Git.Git", "Microsoft.VisualStudio.2022.BuildTools"])
+        self.assertEqual(installed, set())
+        self.assertEqual(messages[-1], ("prereqs_finished", False))
+        errors = [message[2] for message in messages if message[0] == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("33", errors[0])
+        self.assertIn("installer refused the package", errors[0])
+
+
 if __name__ == "__main__":
     unittest.main()

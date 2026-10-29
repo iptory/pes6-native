@@ -48,7 +48,7 @@ except Exception:
     PILImage = None
 
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 SOURCE_URL = f"https://github.com/iptory/pes6-native/archive/refs/tags/v{VERSION}.zip"
 SDK_URL = "https://github.com/rexglue/rexglue-sdk.git"
 SDK_COMMIT = "c94f5ebdcb3c9d1a460ca48e04f9758448f8d518"
@@ -72,6 +72,10 @@ REQUIRED_WINGET_PACKAGES = (
     (frozenset({"ninja"}), "Ninja-build.Ninja"),
     (frozenset({"clang", "clangxx"}), "LLVM.LLVM"),
     (frozenset({"msvc", "rc"}), "Microsoft.VisualStudio.2022.BuildTools"),
+)
+WINGET_VS_OVERRIDE = (
+    "--quiet --wait --norestart "
+    "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 )
 
 
@@ -716,8 +720,8 @@ if _TK_AVAILABLE:
         def __init__(self):
             super().__init__()
             self.title(f"PES6 Native Builder {VERSION}")
-            self.geometry("640x520")
-            self.minsize(560, 480)
+            self.geometry("640x440")
+            self.minsize(600, 440)
             self.iso = tk.StringVar()
             self.output = tk.StringVar(value=str(Path.home() / "Documents" / "PES6NativeBuilder"))
             self.stage_text = tk.StringVar(value="Checking prerequisites...")
@@ -738,65 +742,88 @@ if _TK_AVAILABLE:
             self._pending_source = None
             self._drop_target = None
             self._build_ui()
+            self.update_idletasks()
+            width = max(640, self.winfo_reqwidth())
+            height = max(440, self.winfo_reqheight())
+            self.minsize(width, height)
+            self.geometry(f"{width}x{height}")
             self.after(100, self._drain)
             self.after(500, self._tick)
             self.after(200, self.check_prereqs)
         def _build_ui(self):
-            frame = ttk.Frame(self, padding=14)
+            self.configure(background="#edf0f5")
+            style = ttk.Style(self)
+            style.theme_use("clam")
+            style.configure("PES6.TFrame", background="#edf0f5")
+            style.configure("PES6.TLabel", background="#edf0f5", foreground="#18263d")
+            style.configure("PES6.TButton", padding=(10, 6), font=("Segoe UI", 9))
+            style.configure("Select.PES6.TButton", background="#b92336", foreground="white",
+                            font=("Segoe UI", 10, "bold"), padding=(16, 8))
+            style.map("Select.PES6.TButton",
+                      background=[("disabled", "#d1d5dd"), ("active", "#92192a")],
+                      foreground=[("disabled", "#566174"), ("active", "white")])
+            style.configure("PES6.Horizontal.TProgressbar", background="#b92336",
+                            troughcolor="#dce2eb", borderwidth=0)
+            header = tk.Frame(self, background="#16253f", padx=18, pady=14)
+            header.pack(fill="x")
+            tk.Label(header, text="PES6  /  NATIVE", font=("Segoe UI", 18, "bold"),
+                     background="#16253f", foreground="white").pack(side="left")
+            tk.Label(header, text=f"BUILDER {VERSION}", font=("Segoe UI", 9),
+                     background="#16253f", foreground="#d7e2f4").pack(side="right")
+            frame = ttk.Frame(self, padding=(18, 12), style="PES6.TFrame")
             frame.pack(fill="both", expand=True)
-            ttk.Label(frame, text="PES6 Native setup and builder", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-            ttk.Label(
-                frame,
-                text=(
-                    "Drop your PAL ISO below (or Browse ISO); the build starts "
-                    "automatically. You can also keep using an extracted folder "
-                    "with default.xex. This tool contains no game code or data."
-                ),
-                wraplength=600,
-            ).pack(anchor="w", pady=(4, 10))
-
-            drop_frame = ttk.LabelFrame(frame, text="1. Your game ISO (drag and drop, or browse)", padding=10)
-            drop_frame.pack(fill="x", pady=(0, 8))
+            ttk.Label(frame, text="Your disc. Your game. Ready for Windows.",
+                      font=("Segoe UI", 11, "bold"), style="PES6.TLabel").pack(anchor="w")
             self.drop_hint = ttk.Label(
-                drop_frame,
-                text="Drop a single .iso file here, or use Browse ISO.",
-                wraplength=580,
-            )
-            self.drop_hint.pack(anchor="w", pady=(0, 6))
-            iso_row = ttk.Frame(drop_frame)
+                frame, text="Drop your PAL ISO here or select it to start building.",
+                wraplength=560, style="PES6.TLabel")
+            self.drop_hint.pack(anchor="w", pady=(4, 10))
+            iso_row = ttk.Frame(frame, style="PES6.TFrame")
             iso_row.pack(fill="x")
-            ttk.Entry(iso_row, textvariable=self.iso).pack(side="left", fill="x", expand=True, padx=(0, 8))
-            ttk.Button(iso_row, text="Browse ISO", command=self.pick_iso).pack(side="left")
-            ttk.Button(iso_row, text="Browse folder", command=self.pick_folder).pack(side="left", padx=(6, 0))
-
-            out_frame = ttk.LabelFrame(frame, text="2. Build output folder", padding=10)
-            out_frame.pack(fill="x", pady=(0, 8))
-            out_row = ttk.Frame(out_frame)
-            out_row.pack(fill="x")
-            ttk.Entry(out_row, textvariable=self.output).pack(side="left", fill="x", expand=True, padx=(0, 8))
-            ttk.Button(out_row, text="Browse", command=self.pick_output).pack(side="left")
-
-            actions = ttk.Frame(frame)
-            actions.pack(fill="x", pady=(2, 6))
-            self.start_button = ttk.Button(actions, text="Build and install", command=self.start_build_requested)
+            ttk.Entry(iso_row, textvariable=self.iso).pack(
+                side="left", fill="x", expand=True, padx=(0, 8))
+            ttk.Button(iso_row, text="Select ISO", style="Select.PES6.TButton",
+                       command=self.pick_iso).pack(side="left")
+            ttk.Button(iso_row, text="Folder", style="PES6.TButton",
+                       command=self.pick_folder).pack(side="left", padx=(6, 0))
+            out_row = ttk.Frame(frame, style="PES6.TFrame")
+            out_row.pack(fill="x", pady=(10, 8))
+            ttk.Label(out_row, text="Save to", style="PES6.TLabel").pack(side="left", padx=(0, 8))
+            ttk.Entry(out_row, textvariable=self.output).pack(side="left", fill="x", expand=True)
+            ttk.Button(out_row, text="Browse", command=self.pick_output).pack(side="left", padx=(8, 0))
+            tk.Label(frame, textvariable=self.stage_text, background="#edf0f5",
+                     foreground="#18263d", font=("Segoe UI", 10, "bold"),
+                     wraplength=560, height=2, anchor="w", justify="left").pack(fill="x", pady=(8, 3))
+            self.progress = ttk.Progressbar(
+                frame, mode="indeterminate", style="PES6.Horizontal.TProgressbar")
+            self.progress.pack(fill="x", pady=(0, 4))
+            tk.Label(frame, textvariable=self.detail_text, wraplength=560, height=2,
+                     anchor="w", justify="left", font=("Segoe UI", 9),
+                     background="#edf0f5", foreground="#18263d").pack(fill="x")
+            # Keep actions and prerequisites above the expandable log at every window size.
+            actions = ttk.Frame(frame, style="PES6.TFrame")
+            actions.pack(fill="x", pady=(10, 6))
+            self.start_button = ttk.Button(actions, text="Build / retry", command=self.start_build_requested)
             self.start_button.pack(side="left")
             self.cancel_button = ttk.Button(actions, text="Cancel", command=self.cancel, state="disabled")
-            self.cancel_button.pack(side="left", padx=(8, 0))
-            ttk.Button(actions, text="Open output folder", command=self.open_output).pack(side="left", padx=(8, 0))
+            self.cancel_button.pack(side="left", padx=(6, 0))
+            ttk.Button(actions, text="Open game folder", command=self.open_output).pack(side="left", padx=(6, 0))
             self.licenses_button = ttk.Button(actions, text="Licenses", command=self.open_licenses)
-            self.licenses_button.pack(side="left", padx=(8, 0))
-
-            ttk.Label(frame, textvariable=self.stage_text, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(4, 0))
-            ttk.Label(frame, textvariable=self.detail_text, wraplength=600).pack(anchor="w", pady=(0, 2))
-            self.progress = ttk.Progressbar(frame, mode="indeterminate", length=360)
-            self.progress.pack(anchor="w", pady=(0, 4))
-            self.log_view = tk.Text(frame, height=10, wrap="word", state="disabled")
-            self.log_view.pack(fill="both", expand=True)
-            prereq_row = ttk.Frame(frame)
-            prereq_row.pack(fill="x", pady=(6, 0))
-            self.prereq_summary = ttk.Label(prereq_row, text="Checking prerequisites...", wraplength=600)
+            self.licenses_button.pack(side="right")
+            prereq_row = ttk.Frame(frame, style="PES6.TFrame")
+            prereq_row.pack(fill="x", pady=(0, 5))
+            self.prereq_summary = ttk.Label(prereq_row, text="Checking tools...",
+                                            wraplength=460, style="PES6.TLabel")
             self.prereq_summary.pack(side="left", fill="x", expand=True)
-            ttk.Button(prereq_row, text="Details", command=self.show_prereq_details).pack(side="right")
+            ttk.Button(prereq_row, text="Tool details", command=self.show_prereq_details).pack(side="right")
+            self.log_visible = tk.BooleanVar(value=False)
+            ttk.Checkbutton(frame, text="Show build log", variable=self.log_visible,
+                            command=self._toggle_log).pack(anchor="w")
+            self.log_view = tk.Text(frame, height=9, wrap="word", state="disabled",
+                                    background="white", foreground="#18263d",
+                                    font=("Consolas", 9), relief="flat")
+            ttk.Label(frame, text="Uses your own ISO. No game code or data is included.",
+                      style="PES6.TLabel", font=("Segoe UI", 8)).pack(anchor="w", pady=(6, 0))
             self._prereq_report = ""
             self._prereq_missing: list = []
             try:
@@ -808,6 +835,14 @@ if _TK_AVAILABLE:
                     )
             except Exception:
                 self._drop_target = None
+
+        def _toggle_log(self):
+            if self.log_visible.get():
+                self.log_view.pack(fill="both", expand=True, pady=(8, 0))
+                self.geometry(f"{self.winfo_width()}x{self.winfo_height() + 180}")
+            else:
+                self.log_view.pack_forget()
+                self.geometry(f"{self.winfo_width()}x{max(440, self.winfo_height() - 180)}")
 
         # -- Thread-safe reporting (callable from the worker thread). --
         def _post(self, message):
@@ -1047,7 +1082,7 @@ if _TK_AVAILABLE:
             if self._prereq_missing:
                 self.set_status("Select your ISO; the builder will offer to install missing tools.")
             else:
-                self.set_status("Ready. Drop your ISO or press Browse ISO.")
+                self.set_status("Ready. Drop your ISO or press Select ISO.")
 
         def show_prereq_details(self):
             report = self._prereq_report or format_prereq_report(prereqs())[0]
